@@ -7,13 +7,16 @@ import json
 import pandas as pd
 import random
 import pickle
+import csv
 from itertools import product
 from itertools import combinations
 from collections import defaultdict
-from datetime import date
+from datetime import date, datetime
  
 PROJECT_ROOT = Path(__file__).resolve().parent
 CREDENTIALS_PATH = PROJECT_ROOT / "credentials.txt"
+RESULTS_DIR = PROJECT_ROOT / "results"
+DEFAULT_RESULTS_CSV = RESULTS_DIR / "simulation_results.csv"
 
 
 def load_credentials():
@@ -65,6 +68,53 @@ def normalize_brain_date(value, year=None):
         return value
     resolved_year = year or date.today().year
     return f"{resolved_year}-{value}"
+
+
+def result_row_from_metrics(metrics, region=None, universe=None, neutralization=None, status=None):
+    return {
+        "logged_at": datetime.now().isoformat(timespec="seconds"),
+        "alpha_id": metrics.get("alpha_id"),
+        "status": status,
+        "region": region,
+        "universe": universe,
+        "neutralization": neutralization,
+        "sharpe": metrics.get("sharpe"),
+        "fitness": metrics.get("fitness"),
+        "turnover": metrics.get("turnover"),
+        "margin": metrics.get("margin"),
+        "decay": metrics.get("decay"),
+        "dateCreated": metrics.get("dateCreated"),
+        "expr": metrics.get("exp"),
+    }
+
+
+def append_result_csv(metrics, csv_path=DEFAULT_RESULTS_CSV, region=None, universe=None, neutralization=None, status=None):
+    if not csv_path:
+        return
+    csv_path = Path(csv_path)
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    row = result_row_from_metrics(metrics, region, universe, neutralization, status)
+    fieldnames = list(row.keys())
+    file_exists = csv_path.exists()
+    with open(csv_path, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(row)
+
+
+def load_logged_expressions(csv_path=DEFAULT_RESULTS_CSV):
+    csv_path = Path(csv_path)
+    if not csv_path.exists():
+        return set()
+    try:
+        df = pd.read_csv(csv_path)
+    except Exception as e:
+        print(f"Could not read existing result log {csv_path}: {e}")
+        return set()
+    if "expr" not in df.columns:
+        return set()
+    return set(df["expr"].dropna().astype(str))
 
 def login():
  
@@ -176,24 +226,7 @@ def wait_for_single_simulation_completion(s, progress_url, task_idx, alpha_idx):
     status = progress_json.get("status", 0)
     alpha_id = progress_json.get("alpha")
     print(f"Single simulation {task_idx}.{alpha_idx} finished with status={status}, alpha_id={alpha_id}")
-    if alpha_id:
-        print_alpha_result(locate_alpha(s, alpha_id), prefix=f"Result {task_idx}.{alpha_idx}")
     return progress_json
- 
-def locate_alpha(s, alpha_id):
-    alpha = s.get("https://api.worldquantbrain.com/alphas/" + alpha_id)
-    string = alpha.content.decode('utf-8')
-    metrics = json.loads(string)
-    return {
-        "alpha_id": alpha_id,
-        "exp": metrics.get("regular", {}).get("code"),
-        "sharpe": metrics.get("is", {}).get("sharpe"),
-        "fitness": metrics.get("is", {}).get("fitness"),
-        "turnover": metrics.get("is", {}).get("turnover"),
-        "margin": metrics.get("is", {}).get("margin"),
-        "dateCreated": metrics.get("dateCreated"),
-        "decay": metrics.get("settings", {}).get("decay"),
-    }
  
 def set_alpha_properties(
     s,
@@ -220,8 +253,40 @@ def set_alpha_properties(
     response = s.patch(
         "https://api.worldquantbrain.com/alphas/" + alpha_id, json=params
     )
+    if response.status_code not in {200, 201, 204}:
+        print(f"Failed to update alpha {alpha_id}: {response.status_code} {response.text}")
+    return response
  
-def check_submission(alpha_bag, gold_bag, start):
+def mark_alpha_for_submission(
+    s,
+    alpha_id,
+    prod_correlation=None,
+    color="GREEN",
+    tags=None,
+):
+    tags = tags or ["submittable", "wq-assistant"]
+    selection_desc = "Passed submission checks"
+    if prod_correlation is not None:
+        selection_desc += f"; PROD_CORRELATION={prod_correlation}"
+
+    return set_alpha_properties(
+        s,
+        alpha_id,
+        color=color,
+        selection_desc=selection_desc,
+        combo_desc="Marked by wq-assistant after submission check",
+        tags=tags,
+    )
+
+
+def check_submission(
+    alpha_bag,
+    gold_bag,
+    start,
+    mark_passed=True,
+    mark_color="GREEN",
+    mark_tags=None,
+):
     depot = []
     s = login()
     for idx, g in enumerate(alpha_bag):
@@ -249,6 +314,8 @@ def check_submission(alpha_bag, gold_bag, start):
         else:
             print(g)
             gold_bag.append((g, pc))
+            if mark_passed:
+                mark_alpha_for_submission(s, g, pc, color=mark_color, tags=mark_tags)
     print(depot)
     return gold_bag
 
@@ -302,8 +369,15 @@ def dedupe_alpha_list(alpha_list):
     return deduped
 
 
-def prepare_alpha_list(alpha_list, max_count=None, shuffle=True):
+def prepare_alpha_list(alpha_list, max_count=None, shuffle=True, skip_logged=True, results_csv=DEFAULT_RESULTS_CSV):
     prepared = dedupe_alpha_list(alpha_list)
+    original_count = len(prepared)
+    if skip_logged:
+        logged_expressions = load_logged_expressions(results_csv)
+        prepared = [(alpha, decay) for alpha, decay in prepared if alpha not in logged_expressions]
+        skipped_count = original_count - len(prepared)
+        if skipped_count:
+            print(f"Skipped {skipped_count} expressions already present in {results_csv}")
     if shuffle:
         random.shuffle(prepared)
     if max_count is not None:
@@ -312,7 +386,7 @@ def prepare_alpha_list(alpha_list, max_count=None, shuffle=True):
     return prepared
 
 
-def multi_simulate(alpha_pools, neut, region, universe, start, mode="auto"):
+def multi_simulate(alpha_pools, neut, region, universe, start, mode="auto", results_csv=DEFAULT_RESULTS_CSV):
 
     s = login()
 
@@ -372,7 +446,13 @@ def multi_simulate(alpha_pools, neut, region, universe, start, mode="auto"):
                     if not simulation_progress_url:
                         continue
 
-                    wait_for_single_simulation_completion(s, simulation_progress_url, y, idx)
+                    progress_json = wait_for_single_simulation_completion(s, simulation_progress_url, y, idx)
+                    alpha_id = progress_json.get("alpha") if progress_json else None
+                    status = progress_json.get("status") if progress_json else None
+                    if alpha_id:
+                        metrics = locate_alpha(s, alpha_id)
+                        print_alpha_result(metrics, prefix=f"Result {x}.{y}.{idx}")
+                        append_result_csv(metrics, results_csv, region, universe, neut, status)
             except PermissionError as e:
                 print(f"Permission error: {e}")
                 raise
@@ -395,17 +475,23 @@ def multi_simulate(alpha_pools, neut, region, universe, start, mode="auto"):
                 progress_json = simulation_progress.json()
                 alpha_id = progress_json.get("alpha")
                 if alpha_id:
-                    print_alpha_result(locate_alpha(s, alpha_id), prefix=f"Result {x}.{j}")
+                    metrics = locate_alpha(s, alpha_id)
+                    print_alpha_result(metrics, prefix=f"Result {x}.{j}")
+                    append_result_csv(metrics, results_csv, region, universe, neut, status)
 
                 children = progress_json.get("children", []) or []
                 for child_idx, child in enumerate(children):
                     child_progress = wait_for_simulation_progress(s, brain_api_url + "/simulations/" + child)
-                    child_alpha_id = child_progress.json().get("alpha")
+                    child_progress_json = child_progress.json()
+                    child_alpha_id = child_progress_json.get("alpha")
+                    child_status = child_progress_json.get("status")
                     if child_alpha_id:
+                        metrics = locate_alpha(s, child_alpha_id)
                         print_alpha_result(
-                            locate_alpha(s, child_alpha_id),
+                            metrics,
                             prefix=f"Result {x}.{j}.{child_idx}",
                         )
+                        append_result_csv(metrics, results_csv, region, universe, neut, child_status)
             except KeyError:
                 print("look into: %s"%progress)
             except Exception as e:
@@ -754,11 +840,17 @@ def first_order_factory(fields, ops_set):
  
     return alpha_set
     
-def get_group_second_order_factory(first_order, group_ops, region):
+def get_group_second_order_factory(first_order, group_ops, region, group_limit=None, core_groups_only=False):
     second_order = []
     for fo in first_order:
         for group_op in group_ops:
-            second_order += group_factory(group_op, fo, region)
+            second_order += group_factory(
+                group_op,
+                fo,
+                region,
+                group_limit=group_limit,
+                core_groups_only=core_groups_only,
+            )
     return second_order
  
 def get_ts_second_order_factory(first_order, ts_ops):
@@ -796,18 +888,18 @@ def arith_ts_factory(arith_op, ts_op, field):
         second_order.append("%s(%s)"%(arith_op, fo))
     return second_order
  
-def ts_group_factory(ts_op, group_op, field, region):
+def ts_group_factory(ts_op, group_op, field, region, group_limit=None, core_groups_only=False):
     second_order = []
-    first_order = group_factory(group_op, field, region)
+    first_order = group_factory(group_op, field, region, group_limit=group_limit, core_groups_only=core_groups_only)
     for fo in first_order:
         second_order += ts_factory(ts_op, fo)
     return second_order
  
-def group_ts_factory(group_op, ts_op, field, region):
+def group_ts_factory(group_op, ts_op, field, region, group_limit=None, core_groups_only=False):
     second_order = []
     first_order = ts_factory(ts_op, field)
     for fo in first_order:
-        second_order += group_factory(group_op, fo, region)
+        second_order += group_factory(group_op, fo, region, group_limit=group_limit, core_groups_only=core_groups_only)
     return second_order
  
 def vector_factory(op, field):
@@ -949,7 +1041,7 @@ def twin_field_factory(op, field, fields):
     return output
  
  
-def group_factory(op, field, region):
+def group_factory(op, field, region, group_limit=None, core_groups_only=False):
     output = []
     vectors = ["cap"] 
     
@@ -1045,7 +1137,9 @@ def group_factory(op, field, region):
     groups = ["market","sector", "industry", "subindustry",
               pb_group, bps_group, cap_group, asset_group, sector_cap_group, sector_asset_group, vol_group, liquidity_group]
 
-    if region == "CHN":
+    if core_groups_only:
+        groups = ["market", "sector", "industry", "subindustry", cap_group, vol_group, liquidity_group]
+    elif region == "CHN":
         groups += chn_group_13 + chn_group_1 + chn_group_2  
     if region == "TWN":
         groups += twn_group_13 + twn_group_1 + twn_group_2 
@@ -1065,6 +1159,10 @@ def group_factory(op, field, region):
         groups += amr_group_13 
     if region == "JPN":
         groups += jpn_group_1 + jpn_group_2 + jpn_group_13 
+
+    groups = list(dict.fromkeys(groups))
+    if group_limit is not None:
+        groups = groups[:group_limit]
         
     for group in groups:
         if op.startswith("group_vector"):

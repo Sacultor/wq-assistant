@@ -30,6 +30,9 @@ ENV/
 # Jupyter artifacts
 .ipynb_checkpoints/
 
+# Local research logs
+results/
+
 # Editor and OS files
 .DS_Store
 .vscode/

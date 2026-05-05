@@ -66,6 +66,8 @@ fo_alpha_list = [(alpha, 6) for alpha in first_order]
 fo_alpha_list = prepare_alpha_list(fo_alpha_list, max_count=100, shuffle=True)
 ```
 
+`prepare_alpha_list()` removes duplicate expressions and, by default, skips expressions already present in `results/simulation_results.csv`.
+
 Run simulations:
 
 ```python
@@ -81,6 +83,8 @@ After each completed simulation, the code prints a readable result line:
 Result 0.0: id=... sharpe= 1.523 fitness= 1.114 turnover= 0.271 margin= 0.0042 decay=6
   expr: ts_rank(...)
 ```
+
+The same result is appended to `results/simulation_results.csv`, including alpha ID, Sharpe, Fitness, Turnover, Margin, Decay, date, region, universe, neutralization, status, and expression. The `results/` folder is ignored by Git.
 
 ## Filtering Results
 
@@ -113,7 +117,7 @@ group_ops = ["group_neutralize", "group_rank", "group_zscore"]
 so_alpha_list = []
 
 for expr, decay in fo_layer:
-    for alpha in get_group_second_order_factory([expr], group_ops, region):
+    for alpha in get_group_second_order_factory([expr], group_ops, region, core_groups_only=True, group_limit=8):
         so_alpha_list.append((alpha, decay))
 
 so_alpha_list = prepare_alpha_list(so_alpha_list, max_count=200, shuffle=True)
@@ -122,6 +126,8 @@ multi_simulate(so_pools, neutralization, region, universe, 0)
 ```
 
 Choose the `prune()` prefix to match your dataset field prefix. If you use `analyst4`, do not leave an old prefix like `mdl26`.
+
+Use `core_groups_only=True` and `group_limit=...` to keep the group search space under control.
 
 ## Third-Order Expansion
 
@@ -158,6 +164,19 @@ view_alphas(gold_bag)
 
 `view_alphas()` prints candidates sorted by Sharpe and includes `PROD_CORRELATION`.
 
+By default, `check_submission()` marks passing alphas on Brain with color `GREEN` and tags `submittable` and `wq-assistant`. To customize:
+
+```python
+check_submission(
+    stone_bag,
+    gold_bag,
+    0,
+    mark_passed=True,
+    mark_color="GREEN",
+    mark_tags=["submittable", "wq-assistant", "review"],
+)
+```
+
 ## Key Parameters To Tune
 
 - `dataset_id`: source of raw signals, such as `analyst4` or `news12`.
@@ -170,6 +189,9 @@ view_alphas(gold_bag)
 - `group_ops`: second-order group transformations.
 - `trade_when_factory()` events: third-order entry and exit logic.
 - `max_count`: practical limit for each simulation layer.
+- `group_limit`: maximum group definitions used per group operator.
+- `core_groups_only`: use only core market, sector, industry, subindustry, cap, volatility, and liquidity groups.
+- `results_csv`: local CSV log path used for result persistence and duplicate skipping.
 
 ## Practical Advice
 
@@ -273,6 +295,8 @@ Result 0.0: id=... sharpe= 1.523 fitness= 1.114 turnover= 0.271 margin= 0.0042 d
   expr: ts_rank(...)
 ```
 
+同一条结果也会写入 `results/simulation_results.csv`，包括 alpha ID、Sharpe、Fitness、Turnover、Margin、Decay、日期、市场、股票池、中性化方式、状态和表达式。`results/` 目录已经被 Git 忽略。
+
 ## 筛选结果
 
 使用 `get_alphas()` 获取某个日期区间内表现较好的 alpha。你可以传 `MM-DD` 短日期，也可以传完整的 `YYYY-MM-DD` 日期。
@@ -304,7 +328,7 @@ group_ops = ["group_neutralize", "group_rank", "group_zscore"]
 so_alpha_list = []
 
 for expr, decay in fo_layer:
-    for alpha in get_group_second_order_factory([expr], group_ops, region):
+    for alpha in get_group_second_order_factory([expr], group_ops, region, core_groups_only=True, group_limit=8):
         so_alpha_list.append((alpha, decay))
 
 so_alpha_list = prepare_alpha_list(so_alpha_list, max_count=200, shuffle=True)
@@ -313,6 +337,8 @@ multi_simulate(so_pools, neutralization, region, universe, 0)
 ```
 
 `prune()` 的 prefix 要和你的数据字段前缀匹配。如果你使用的是 `analyst4`，不要保留旧的 `mdl26` 之类的 prefix。
+
+使用 `core_groups_only=True` 和 `group_limit=...` 可以控制 group 搜索空间，避免二阶 alpha 数量过大。
 
 ## 三阶扩展
 
@@ -349,6 +375,19 @@ view_alphas(gold_bag)
 
 `view_alphas()` 会按 Sharpe 排序打印候选，并显示 `PROD_CORRELATION`。
 
+默认情况下，`check_submission()` 会把通过检查的 alpha 在 Brain 上标成绿色，并添加 `submittable` 和 `wq-assistant` 标签。你也可以自定义：
+
+```python
+check_submission(
+    stone_bag,
+    gold_bag,
+    0,
+    mark_passed=True,
+    mark_color="GREEN",
+    mark_tags=["submittable", "wq-assistant", "review"],
+)
+```
+
 ## 关键可调参数
 
 - `dataset_id`：原始信号来源，例如 `analyst4` 或 `news12`。
@@ -361,6 +400,9 @@ view_alphas(gold_bag)
 - `group_ops`：二阶 group 变换方式。
 - `trade_when_factory()` 事件：三阶开仓和平仓逻辑。
 - `max_count`：每一层实际提交模拟的数量上限。
+- `group_limit`：每个 group 算子最多使用多少个分组定义。
+- `core_groups_only`：只使用市场、行业、市值、波动率、流动性等核心分组。
+- `results_csv`：本地 CSV 日志路径，用于保存回测结果和跳过已跑表达式。
 
 ## 实用建议
 
