@@ -1,6 +1,6 @@
 import requests
 from os import environ
-from os.path import expanduser
+from pathlib import Path
 from time import sleep
 import time
 import json
@@ -10,11 +10,24 @@ import pickle
 from itertools import product
 from itertools import combinations
 from collections import defaultdict
+from datetime import date
  
-with open(expanduser('credentials.txt'), 'r') as f:
-    credentials = json.load(f)
-    username = credentials['username']
-    password = credentials['password']
+PROJECT_ROOT = Path(__file__).resolve().parent
+CREDENTIALS_PATH = PROJECT_ROOT / "credentials.txt"
+
+
+def load_credentials():
+    username = environ.get("WQB_USERNAME")
+    password = environ.get("WQB_PASSWORD")
+    if username and password:
+        return username, password
+
+    with open(CREDENTIALS_PATH, "r") as f:
+        credentials = json.load(f)
+    return credentials["username"], credentials["password"]
+
+
+username, password = load_credentials()
  
 basic_ops = ["reverse", "inverse", "rank", "zscore", "quantile", "normalize"]
  
@@ -22,6 +35,36 @@ ts_ops = ["ts_rank", "ts_zscore", "ts_delta",  "ts_sum", "ts_delay",
           "ts_std_dev", "ts_mean",  "ts_arg_min", "ts_arg_max","ts_scale", "ts_quantile"]
  
 ops_set = basic_ops + ts_ops 
+
+
+def format_alpha_metrics(metrics):
+    alpha_id = metrics.get("alpha_id") or "-"
+    sharpe = metrics.get("sharpe")
+    fitness = metrics.get("fitness")
+    turnover = metrics.get("turnover")
+    margin = metrics.get("margin")
+    return (
+        f"id={alpha_id:<14} "
+        f"sharpe={(sharpe if sharpe is not None else 0):>6.3f} "
+        f"fitness={(fitness if fitness is not None else 0):>6.3f} "
+        f"turnover={(turnover if turnover is not None else 0):>6.3f} "
+        f"margin={(margin if margin is not None else 0):>8.4f} "
+        f"decay={metrics.get('decay', '-')}"
+    )
+
+
+def print_alpha_result(metrics, prefix="Alpha"):
+    print(f"{prefix}: {format_alpha_metrics(metrics)}")
+    exp = metrics.get("exp")
+    if exp:
+        print(f"  expr: {exp}")
+
+
+def normalize_brain_date(value, year=None):
+    if len(value) == 10 and value[4] == "-":
+        return value
+    resolved_year = year or date.today().year
+    return f"{resolved_year}-{value}"
 
 def login():
  
@@ -133,23 +176,24 @@ def wait_for_single_simulation_completion(s, progress_url, task_idx, alpha_idx):
     status = progress_json.get("status", 0)
     alpha_id = progress_json.get("alpha")
     print(f"Single simulation {task_idx}.{alpha_idx} finished with status={status}, alpha_id={alpha_id}")
+    if alpha_id:
+        print_alpha_result(locate_alpha(s, alpha_id), prefix=f"Result {task_idx}.{alpha_idx}")
     return progress_json
  
 def locate_alpha(s, alpha_id):
     alpha = s.get("https://api.worldquantbrain.com/alphas/" + alpha_id)
     string = alpha.content.decode('utf-8')
     metrics = json.loads(string)
-    #print(metrics["regular"]["code"])
-    
-    dateCreated = metrics["dateCreated"]
-    sharpe = metrics["is"]["sharpe"]
-    fitness = metrics["is"]["fitness"]
-    turnover = metrics["is"]["turnover"]
-    margin = metrics["is"]["margin"]
-    
-    triple = [sharpe, fitness, turnover, margin, dateCreated]
- 
-    return triple
+    return {
+        "alpha_id": alpha_id,
+        "exp": metrics.get("regular", {}).get("code"),
+        "sharpe": metrics.get("is", {}).get("sharpe"),
+        "fitness": metrics.get("is", {}).get("fitness"),
+        "turnover": metrics.get("is", {}).get("turnover"),
+        "margin": metrics.get("is", {}).get("margin"),
+        "dateCreated": metrics.get("dateCreated"),
+        "decay": metrics.get("settings", {}).get("decay"),
+    }
  
 def set_alpha_properties(
     s,
@@ -246,6 +290,28 @@ def get_vec_fields(fields):
  
     return(vec_fields)
 
+def dedupe_alpha_list(alpha_list):
+    seen = set()
+    deduped = []
+    for alpha, decay in alpha_list:
+        key = (alpha, decay)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((alpha, decay))
+    return deduped
+
+
+def prepare_alpha_list(alpha_list, max_count=None, shuffle=True):
+    prepared = dedupe_alpha_list(alpha_list)
+    if shuffle:
+        random.shuffle(prepared)
+    if max_count is not None:
+        prepared = prepared[:max_count]
+    print(f"Prepared {len(prepared)} unique alpha expressions")
+    return prepared
+
+
 def multi_simulate(alpha_pools, neut, region, universe, start, mode="auto"):
 
     s = login()
@@ -326,24 +392,24 @@ def multi_simulate(alpha_pools, neut, region, universe, start, mode="auto"):
                 status = simulation_progress.json().get("status", 0)
                 if status != "COMPLETE":
                     print("Not complete : %s"%(progress))
+                progress_json = simulation_progress.json()
+                alpha_id = progress_json.get("alpha")
+                if alpha_id:
+                    print_alpha_result(locate_alpha(s, alpha_id), prefix=f"Result {x}.{j}")
 
-                """
-                #alpha_id = simulation_progress.json()["alpha"]
-                children = simulation_progress.json().get("children", 0)
-                children_list = []
-                for child in children:
-                    child_progress = s.get(brain_api_url + "/simulations/" + child)
-                    alpha_id = child_progress.json()["alpha"]
-
-                    set_alpha_properties(s,
-                            alpha_id,
-                            name = "%s"%name,
-                            color = None,)
-                """
+                children = progress_json.get("children", []) or []
+                for child_idx, child in enumerate(children):
+                    child_progress = wait_for_simulation_progress(s, brain_api_url + "/simulations/" + child)
+                    child_alpha_id = child_progress.json().get("alpha")
+                    if child_alpha_id:
+                        print_alpha_result(
+                            locate_alpha(s, child_alpha_id),
+                            prefix=f"Result {x}.{j}.{child_idx}",
+                        )
             except KeyError:
                 print("look into: %s"%progress)
-            except:
-                print("other")
+            except Exception as e:
+                print(f"Error reading simulation result {progress}: {e}")
 
 
         print("pool %d task %d simulate done"%(x, last_progress_idx))
@@ -477,6 +543,8 @@ def process_datafields(df, data_type):
         datafields = df[df['type'] == "MATRIX"]["id"].tolist()
     elif data_type == "vector":
         datafields = get_vec_fields(df[df['type'] == "VECTOR"]["id"].tolist())
+    else:
+        raise ValueError("data_type must be either 'matrix' or 'vector'")
 
     tb_fields = []
     for field in datafields:
@@ -487,15 +555,14 @@ def view_alphas(gold_bag):
     s = login()
     sharp_list = []
     for gold, pc in gold_bag:
+        metrics = locate_alpha(s, gold)
+        metrics["prod_correlation"] = pc
+        sharp_list.append(metrics)
 
-        triple = locate_alpha(s, gold)
-        info = [triple[0], triple[2], triple[3], triple[4], triple[5], triple[6], triple[1]]
-        info.append(pc)
-        sharp_list.append(info)
-
-    sharp_list.sort(reverse=True, key = lambda x : x[1])
-    for i in sharp_list:
-        print(i)
+    sharp_list.sort(reverse=True, key=lambda x: x.get("sharpe") or 0)
+    for i, metrics in enumerate(sharp_list, start=1):
+        print_alpha_result(metrics, prefix=f"Candidate {i}")
+        print(f"  prod_correlation: {metrics.get('prod_correlation')}")
  
 def locate_alpha(s, alpha_id):
     while True:
@@ -515,26 +582,36 @@ def locate_alpha(s, alpha_id):
     margin = metrics["is"]["margin"]
     decay = metrics["settings"]["decay"]
     exp = metrics['regular']['code']
-    
-    triple = [alpha_id, exp, sharpe, turnover, fitness, margin, dateCreated, decay]
-    return triple
+
+    return {
+        "alpha_id": alpha_id,
+        "exp": exp,
+        "sharpe": sharpe,
+        "turnover": turnover,
+        "fitness": fitness,
+        "margin": margin,
+        "dateCreated": dateCreated,
+        "decay": decay,
+    }
  
  
-def get_alphas(start_date, end_date, sharpe_th, fitness_th, region, alpha_num, usage):
+def get_alphas(start_date, end_date, sharpe_th, fitness_th, region, alpha_num, usage, year=None):
     s = login()
     output = []
+    start_date = normalize_brain_date(start_date, year)
+    end_date = normalize_brain_date(end_date, year)
     # 3E large 3C less
     count = 0
     for i in range(0, alpha_num, 100):
         print(i)
         url_e = "https://api.worldquantbrain.com/users/self/alphas?limit=100&offset=%d"%(i) \
-                + "&status=UNSUBMITTED%1FIS_FAIL&dateCreated%3E=2026-" + start_date  \
-                + "T00:00:00-04:00&dateCreated%3C2026-" + end_date \
+                + "&status=UNSUBMITTED%1FIS_FAIL&dateCreated%3E=" + start_date  \
+                + "T00:00:00-04:00&dateCreated%3C" + end_date \
                 + "T00:00:00-04:00&is.fitness%3E" + str(fitness_th) + "&is.sharpe%3E" \
                 + str(sharpe_th) + "&settings.region=" + region + "&order=-is.sharpe&hidden=false&type!=SUPER"
         url_c = "https://api.worldquantbrain.com/users/self/alphas?limit=100&offset=%d"%(i) \
-                + "&status=UNSUBMITTED%1FIS_FAIL&dateCreated%3E=2026-" + start_date  \
-                + "T00:00:00-04:00&dateCreated%3C2026-" + end_date \
+                + "&status=UNSUBMITTED%1FIS_FAIL&dateCreated%3E=" + start_date  \
+                + "T00:00:00-04:00&dateCreated%3C" + end_date \
                 + "T00:00:00-04:00&is.fitness%3C-" + str(fitness_th) + "&is.sharpe%3C-" \
                 + str(sharpe_th) + "&settings.region=" + region + "&order=is.sharpe&hidden=false&type!=SUPER"
         urls = [url_e]
@@ -548,7 +625,6 @@ def get_alphas(start_date, end_date, sharpe_th, fitness_th, region, alpha_num, u
                 #print(response.json())
                 for j in range(len(alpha_list)):
                     alpha_id = alpha_list[j]["id"]
-                    name = alpha_list[j]["name"]
                     dateCreated = alpha_list[j]["dateCreated"]
                     sharpe = alpha_list[j]["is"]["sharpe"]
                     fitness = alpha_list[j]["is"]["fitness"]
@@ -564,7 +640,19 @@ def get_alphas(start_date, end_date, sharpe_th, fitness_th, region, alpha_num, u
                         if sharpe < -sharpe_th:
                             exp = "-%s"%exp
                         rec = [alpha_id, exp, sharpe, turnover, fitness, margin, dateCreated, decay]
-                        print(rec)
+                        print_alpha_result(
+                            {
+                                "alpha_id": alpha_id,
+                                "exp": exp,
+                                "sharpe": sharpe,
+                                "fitness": fitness,
+                                "turnover": turnover,
+                                "margin": margin,
+                                "dateCreated": dateCreated,
+                                "decay": decay,
+                            },
+                            prefix="Tracked",
+                        )
                         if turnover > 0.7:
                             rec.append(decay*4)
                         elif turnover > 0.6:
@@ -733,7 +821,7 @@ def vector_factory(op, field):
     
     return output
  
-def trade_when_factory(op,field,region):
+def trade_when_factory(op, field, region, include_region_events=True, max_events=None):
     output = []
     open_events = ["ts_arg_max(volume, 5) == 0", "ts_corr(close, volume, 20) < 0",
                    "ts_corr(close, volume, 5) < 0", "ts_mean(volume,10)>ts_mean(volume,60)",
@@ -794,6 +882,22 @@ def trade_when_factory(op,field,region):
                   "ts_rank(vec_avg(mdl109_news_sent_1m),22) > 0.8",
                   "rank(rp_ess_business) > 0.8",
                   "ts_rank(rp_ess_business,22) > 0.8"]
+
+    if include_region_events:
+        region_events = {
+            "USA": usa_events,
+            "ASI": asi_events,
+            "EUR": eur_events,
+            "GLB": glb_events,
+            "CHN": chn_events,
+            "KOR": kor_events,
+            "TWN": twn_events,
+        }.get(region.upper(), [])
+        open_events += region_events
+
+    open_events = list(dict.fromkeys(open_events))
+    if max_events is not None:
+        open_events = open_events[:max_events]
 
     for oe in open_events:
         for ee in exit_events:
