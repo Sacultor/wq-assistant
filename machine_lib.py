@@ -30,7 +30,16 @@ def load_credentials():
     return credentials["username"], credentials["password"]
 
 
-username, password = load_credentials()
+username = None
+password = None
+
+
+def get_credentials():
+    global username, password
+    if username and password:
+        return username, password
+    username, password = load_credentials()
+    return username, password
  
 basic_ops = ["reverse", "inverse", "rank", "zscore", "quantile", "normalize"]
  
@@ -116,12 +125,143 @@ def load_logged_expressions(csv_path=DEFAULT_RESULTS_CSV):
         return set()
     return set(df["expr"].dropna().astype(str))
 
+
+def load_results(csv_path=DEFAULT_RESULTS_CSV):
+    csv_path = Path(csv_path)
+    if not csv_path.exists():
+        print(f"No result log found at {csv_path}")
+        return pd.DataFrame()
+    return pd.read_csv(csv_path)
+
+
+def adjusted_decay(decay, turnover):
+    if pd.isna(turnover):
+        return decay
+    if turnover > 0.7:
+        return decay * 4
+    if turnover > 0.6:
+        return decay * 3 + 3
+    if turnover > 0.5:
+        return decay * 3
+    if turnover > 0.4:
+        return decay * 2
+    if turnover > 0.35:
+        return decay + 4
+    if turnover > 0.3:
+        return decay + 2
+    return decay
+
+
+def print_feedback_report(
+    csv_path=DEFAULT_RESULTS_CSV,
+    min_sharpe=1.2,
+    min_fitness=1.0,
+    max_turnover=0.7,
+    top_n=10,
+):
+    df = load_results(csv_path)
+    if df.empty:
+        return df
+
+    numeric_cols = ["sharpe", "fitness", "turnover", "margin", "decay"]
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    candidates = df[
+        (df["sharpe"] >= min_sharpe)
+        & (df["fitness"] >= min_fitness)
+        & (df["turnover"] <= max_turnover)
+    ].copy()
+
+    print("\n=== Feedback Summary ===")
+    print(f"result_log: {csv_path}")
+    print(f"total_results: {len(df)}")
+    print(f"candidate_results: {len(candidates)}")
+    print(f"thresholds: sharpe>={min_sharpe}, fitness>={min_fitness}, turnover<={max_turnover}")
+
+    if not candidates.empty:
+        candidates = candidates.sort_values(["sharpe", "fitness"], ascending=False)
+        print("\n=== Top Candidates ===")
+        for _, row in candidates.head(top_n).iterrows():
+            print(
+                f"id={row.get('alpha_id', '-'):<14} "
+                f"sharpe={row.get('sharpe', 0):>6.3f} "
+                f"fitness={row.get('fitness', 0):>6.3f} "
+                f"turnover={row.get('turnover', 0):>6.3f} "
+                f"decay={row.get('decay', '-')}"
+            )
+            print(f"  expr: {row.get('expr', '')}")
+
+    high_turnover = df[
+        (df["sharpe"] >= min_sharpe)
+        & (df["fitness"] >= min_fitness)
+        & (df["turnover"] > max_turnover)
+    ].copy()
+
+    if not high_turnover.empty:
+        high_turnover["suggested_decay"] = high_turnover.apply(
+            lambda row: adjusted_decay(row["decay"], row["turnover"]),
+            axis=1,
+        )
+        print("\n=== High Turnover To Re-test With Higher Decay ===")
+        for _, row in high_turnover.sort_values("sharpe", ascending=False).head(top_n).iterrows():
+            print(
+                f"id={row.get('alpha_id', '-'):<14} "
+                f"sharpe={row.get('sharpe', 0):>6.3f} "
+                f"turnover={row.get('turnover', 0):>6.3f} "
+                f"decay={row.get('decay', '-')} -> {row.get('suggested_decay', '-')}"
+            )
+            print(f"  expr: {row.get('expr', '')}")
+
+    return candidates
+
+
+def build_decay_retest_list(
+    csv_path=DEFAULT_RESULTS_CSV,
+    min_sharpe=1.2,
+    min_fitness=1.0,
+    min_turnover=0.3,
+    max_count=50,
+):
+    df = load_results(csv_path)
+    if df.empty:
+        return []
+    if "expr" not in df.columns:
+        print(f"Result log {csv_path} does not have an expr column")
+        return []
+
+    for col in ["sharpe", "fitness", "turnover", "decay"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df = df[
+        (df["expr"].notna())
+        & (df["sharpe"] >= min_sharpe)
+        & (df["fitness"] >= min_fitness)
+        & (df["turnover"] >= min_turnover)
+    ].copy()
+
+    df = df.sort_values(["sharpe", "fitness"], ascending=False)
+    alpha_list = []
+    seen = set()
+    for _, row in df.iterrows():
+        expr = str(row["expr"])
+        if expr in seen:
+            continue
+        seen.add(expr)
+        alpha_list.append((expr, int(adjusted_decay(row["decay"], row["turnover"]))))
+        if len(alpha_list) >= max_count:
+            break
+    return alpha_list
+
 def login():
  
     # Create a session to persistently store the headers
     s = requests.Session()
     # Save credentials into session
-    s.auth = (username, password)
+    login_username, login_password = get_credentials()
+    s.auth = (login_username, login_password)
  
     # Send a POST request to the /authentication API
     response = s.post('https://api.worldquantbrain.com/authentication')
@@ -235,12 +375,13 @@ def set_alpha_properties(
     color: str = None,
     selection_desc: str = "None",
     combo_desc: str = "None",
-    tags: str = ["ace_tag"],
+    tags=None,
 ):
     """
     Function changes alpha's description parameters
     """
  
+    tags = tags or ["ace_tag"]
     params = {
         "color": color,
         "name": name,
@@ -1141,23 +1282,23 @@ def group_factory(op, field, region, group_limit=None, core_groups_only=False):
         groups = ["market", "sector", "industry", "subindustry", cap_group, vol_group, liquidity_group]
     elif region == "CHN":
         groups += chn_group_13 + chn_group_1 + chn_group_2  
-    if region == "TWN":
+    elif region == "TWN":
         groups += twn_group_13 + twn_group_1 + twn_group_2 
-    if region == "ASI":
+    elif region == "ASI":
         groups += asi_group_13 + asi_group_1 
-    if region == "USA":
+    elif region == "USA":
         groups += usa_group_13 + usa_group_1 + usa_group_2  
-    if region == "HKG":
+    elif region == "HKG":
         groups += hkg_group_13 + hkg_group_1 + hkg_group_2 
-    if region == "KOR":
+    elif region == "KOR":
         groups += kor_group_13 + kor_group_1 + kor_group_2 
-    if region == "EUR": 
+    elif region == "EUR": 
         groups += eur_group_13 + eur_group_1 + eur_group_2 
-    if region == "GLB":
+    elif region == "GLB":
         groups += glb_group_13 + glb_group_1 + glb_group_2
-    if region == "AMR":
+    elif region == "AMR":
         groups += amr_group_13 
-    if region == "JPN":
+    elif region == "JPN":
         groups += jpn_group_1 + jpn_group_2 + jpn_group_13 
 
     groups = list(dict.fromkeys(groups))

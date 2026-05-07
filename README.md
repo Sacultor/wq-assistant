@@ -7,8 +7,100 @@ The project is intended for research automation. It does not auto-submit alphas 
 ## Files
 
 - `machine_lib.py`: login, data-field loading, alpha generation, simulation submission, result filtering, and submission checks.
+- `run_workflow.py`: command-line workflow runner for users who do not want to edit Python code.
+- `crawl_datasets.py`: dataset and data-field crawler that exports readable CSV and TXT catalogs.
+- `config.example.json`: editable workflow configuration template.
 - `Alpha Machine.ipynb`: notebook workflow for running the mining process interactively.
 - `credentials.txt`: local Brain credentials. This file is ignored by Git.
+
+## Recommended Simple Workflow
+
+Use this path if you do not want to edit code.
+
+1. Create your local config:
+
+```bash
+cp config.example.json config.json
+```
+
+2. Edit only these fields in `config.json` first:
+
+```json
+{
+  "region": "USA",
+  "universe": "TOP3000",
+  "dataset_id": "analyst4",
+  "neutralization": "SUBINDUSTRY",
+  "max_first_order": 100,
+  "start_date": "05-06",
+  "end_date": "05-07"
+}
+```
+
+3. Run first-order mining:
+
+```bash
+python run_workflow.py first --config config.json
+```
+
+4. Review feedback from completed simulations:
+
+```bash
+python run_workflow.py report --config config.json
+```
+
+5. Run second-order and third-order expansion only if the report shows promising candidates:
+
+```bash
+python run_workflow.py second --config config.json
+python run_workflow.py third --config config.json
+```
+
+6. Re-test high-turnover but promising alphas with higher decay:
+
+```bash
+python run_workflow.py retest-decay --config config.json
+```
+
+7. Check final candidates and mark passing alphas on Brain:
+
+```bash
+python run_workflow.py submit-check --config config.json
+```
+
+The workflow writes every completed simulation to `results/simulation_results.csv`. Future runs skip already tested expressions by default, so the workflow keeps learning from previous results instead of repeating the same work.
+
+## Data Field Crawler
+
+Use `crawl_datasets.py` when you want to inspect the data fields inside Brain datasets before designing a strategy.
+
+Fetch all datasets for a region and universe:
+
+```bash
+python crawl_datasets.py --region USA --universe TOP3000 --delay 1
+```
+
+Fetch only one or several datasets:
+
+```bash
+python crawl_datasets.py --region USA --universe TOP3000 --dataset analyst4 --dataset news12
+```
+
+Test with only the first few datasets:
+
+```bash
+python crawl_datasets.py --region USA --universe TOP3000 --limit-datasets 5
+```
+
+Outputs are written to `dataset_catalog/`:
+
+- `field_dictionary.csv`: main table of fields, with dataset id, field id, type, name, and description.
+- `fields_by_dataset.txt`: readable text index of fields grouped by dataset.
+- `datafields_raw_all.csv`: raw field table returned by the API.
+- `datasets.csv`: dataset index, used only to know which datasets were scanned.
+- `by_dataset/*.csv`: raw fields for each dataset.
+
+The crawler resumes by default. If a per-dataset CSV already exists, it skips that dataset. Use `--no-resume` to force a fresh fetch.
 
 ## Credentials
 
@@ -220,8 +312,100 @@ Always verify final candidates on the Brain website before submitting.
 ## 文件说明
 
 - `machine_lib.py`：负责登录、加载数据字段、生成 alpha、提交模拟、筛选结果和提交前检查。
+- `run_workflow.py`：命令行工作流脚本，适合不想改 Python 代码的用户。
+- `crawl_datasets.py`：数据集和字段爬取脚本，会导出便于阅读的 CSV 和 TXT 目录。
+- `config.example.json`：可编辑的工作流配置模板。
 - `Alpha Machine.ipynb`：交互式 notebook 工作流，用来一步步运行挖掘流程。
 - `credentials.txt`：本地 Brain 账号凭据。这个文件已经被 Git 忽略，不会上传。
+
+## 推荐的简易工作流
+
+如果你不想改代码，按这个流程走。
+
+1. 创建自己的本地配置：
+
+```bash
+cp config.example.json config.json
+```
+
+2. 先只修改 `config.json` 里的这些字段：
+
+```json
+{
+  "region": "USA",
+  "universe": "TOP3000",
+  "dataset_id": "analyst4",
+  "neutralization": "SUBINDUSTRY",
+  "max_first_order": 100,
+  "start_date": "05-06",
+  "end_date": "05-07"
+}
+```
+
+3. 运行一阶 alpha 挖掘：
+
+```bash
+python run_workflow.py first --config config.json
+```
+
+4. 查看已完成回测的反馈报告：
+
+```bash
+python run_workflow.py report --config config.json
+```
+
+5. 如果报告里有不错的候选，再运行二阶和三阶扩展：
+
+```bash
+python run_workflow.py second --config config.json
+python run_workflow.py third --config config.json
+```
+
+6. 对高换手但表现不错的 alpha，用更高 decay 重新测试：
+
+```bash
+python run_workflow.py retest-decay --config config.json
+```
+
+7. 检查最终候选，并把通过检查的 alpha 在 Brain 上标注出来：
+
+```bash
+python run_workflow.py submit-check --config config.json
+```
+
+每次完成的回测都会写入 `results/simulation_results.csv`。后续运行默认会跳过已经测过的表达式，所以工作流会基于历史反馈继续推进，而不是重复做同样的回测。
+
+## 数据字段爬取工具
+
+当你想查看每个 Brain dataset 里面具体有哪些数据字段，再决定策略方向时，使用 `crawl_datasets.py`。
+
+爬取某个区域和股票池下的全部数据集：
+
+```bash
+python crawl_datasets.py --region USA --universe TOP3000 --delay 1
+```
+
+只爬取一个或几个指定数据集：
+
+```bash
+python crawl_datasets.py --region USA --universe TOP3000 --dataset analyst4 --dataset news12
+```
+
+先用前几个数据集测试：
+
+```bash
+python crawl_datasets.py --region USA --universe TOP3000 --limit-datasets 5
+```
+
+输出会保存在 `dataset_catalog/`：
+
+- `field_dictionary.csv`：最主要的字段总表，包含 dataset id、field id、字段类型、字段名称和字段描述。
+- `fields_by_dataset.txt`：按 dataset 分组的可读字段索引。
+- `datafields_raw_all.csv`：API 返回的原始字段总表。
+- `datasets.csv`：dataset 索引，只用于确认扫描了哪些 dataset。
+- `by_dataset/*.csv`：每个 dataset 单独的原始字段表。
+
+脚本默认支持断点续爬。如果某个 dataset 的 CSV 已经存在，就会跳过它。使用 `--no-resume` 可以强制重新爬取。
 
 ## 凭据配置
 

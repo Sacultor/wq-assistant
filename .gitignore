@@ -32,6 +32,8 @@ ENV/
 
 # Local research logs
 results/
+config.json
+dataset_catalog/
 
 # Editor and OS files
 .DS_Store
