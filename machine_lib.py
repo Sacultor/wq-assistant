@@ -67,8 +67,20 @@ def format_alpha_metrics(metrics):
     )
 
 
+def is_high_quality_alpha(metrics, min_sharpe=1.6, min_fitness=1.3):
+    sharpe = numeric_or_none(metrics.get("sharpe"))
+    fitness = numeric_or_none(metrics.get("fitness"))
+    return (
+        sharpe is not None
+        and fitness is not None
+        and sharpe > min_sharpe
+        and fitness > min_fitness
+    )
+
+
 def print_alpha_result(metrics, prefix="Alpha"):
-    print(f"{prefix}: {format_alpha_metrics(metrics)}")
+    marker = "  <<< HIGH QUALITY: fitness>1.3, sharpe>1.6 >>>" if is_high_quality_alpha(metrics) else ""
+    print(f"{prefix}: {format_alpha_metrics(metrics)}{marker}")
     exp = metrics.get("exp")
     if exp:
         print(f"  expr: {exp}")
@@ -183,6 +195,7 @@ def feedback_record_from_metrics(metrics, region=None, universe=None, neutraliza
     record = result_row_from_metrics(metrics, region, universe, neutralization, status)
     record.update(classify_alpha_feedback(metrics))
     record.update(extract_expression_features(metrics.get("exp")))
+    record["quality_tag"] = "HIGH_QUALITY" if is_high_quality_alpha(metrics) else ""
     return record
 
 
@@ -468,6 +481,31 @@ def select_high_quality_alphas(
     print(f"Wrote {csv_out}")
     print(f"Wrote {txt_out}")
     return selected
+
+
+def print_resume_status(csv_path=DEFAULT_RESULTS_CSV, recent_n=5):
+    df = load_results(csv_path)
+    if df.empty:
+        print("No completed simulations logged yet.")
+        print(f"Result log path: {csv_path}")
+        return df
+
+    unique_expr = df["expr"].dropna().astype(str).nunique() if "expr" in df.columns else 0
+    print("\n=== Resume Status ===")
+    print(f"result_log: {csv_path}")
+    print(f"completed_rows: {len(df)}")
+    print(f"unique_completed_expressions: {unique_expr}")
+    print("resume_rule: rerun the same command; logged expressions are skipped")
+
+    for col in ["sharpe", "fitness", "turnover", "margin", "decay"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    recent = df.tail(recent_n).copy()
+    if not recent.empty and {"sharpe", "fitness", "expr"}.issubset(recent.columns):
+        print("\nRecent completed simulations:")
+        print(format_alpha_table(recent, expr_width=80))
+    return df
 
 
 def export_feedback_artifacts(
@@ -866,7 +904,16 @@ def prepare_alpha_list(alpha_list, max_count=None, shuffle=True, skip_logged=Tru
     return prepared
 
 
-def multi_simulate(alpha_pools, neut, region, universe, start, mode="auto", results_csv=DEFAULT_RESULTS_CSV):
+def multi_simulate(
+    alpha_pools,
+    neut,
+    region,
+    universe,
+    start,
+    mode="auto",
+    results_csv=DEFAULT_RESULTS_CSV,
+    error_sleep_seconds=6,
+):
 
     s = login()
 
@@ -908,14 +955,16 @@ def multi_simulate(alpha_pools, neut, region, universe, start, mode="auto", resu
                         print(f"Error submitting simulation (status {simulation_response.status_code}): {simulation_text}")
                         if simulation_json is not None:
                             print(f"JSON response: {simulation_json}")
-                        sleep(600)
+                        print(f"Waiting {error_sleep_seconds}s after submission error")
+                        sleep(error_sleep_seconds)
                         s = login()
                         continue
                     else:
                         simulation_progress_url = simulation_response.headers.get('Location')
                         if not simulation_progress_url:
                             print(f"No Location header in response: {simulation_response.headers}")
-                            sleep(600)
+                            print(f"Waiting {error_sleep_seconds}s before re-login")
+                            sleep(error_sleep_seconds)
                             s = login()
                             continue
                         progress_urls.append(simulation_progress_url)
@@ -938,7 +987,8 @@ def multi_simulate(alpha_pools, neut, region, universe, start, mode="auto", resu
                 raise
             except Exception as e:
                 print(f"Error during simulation submission: {e}")
-                sleep(600)
+                print(f"Waiting {error_sleep_seconds}s before re-login")
+                sleep(error_sleep_seconds)
                 s = login()
 
         print("pool %d task %d post done"%(x,y))

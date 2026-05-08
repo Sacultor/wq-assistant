@@ -1,0 +1,195 @@
+wq-assistant 最简单使用方法
+============================
+
+1. 进入项目目录
+
+cd /Users/xxzero/worldquant/wq-assistant
+
+
+2. 安装依赖
+
+python -m pip install -r requirements.txt
+
+
+3. 创建本地配置文件
+
+cp config.example.json config.json
+
+然后打开 config.json，先主要改这几个字段：
+
+{
+  "region": "USA",
+  "universe": "TOP3000",
+  "dataset_id": "analyst4",
+  "neutralization": "SUBINDUSTRY",
+  "start_date": "05-08",
+  "end_date": "05-09"
+}
+
+非顾问权限相关配置保持这样，不要改：
+
+{
+  "max_alphas_per_run": 3,
+  "simulation_mode": "single",
+  "task_size": 3,
+  "pool_size": 1,
+  "alpha_shuffle": false,
+  "skip_logged": true
+}
+
+
+4. 配置 WorldQuant Brain 账号
+
+推荐用环境变量：
+
+export WQB_USERNAME="你的账号"
+export WQB_PASSWORD="你的密码"
+
+也可以使用项目里的 credentials.txt，格式是：
+
+{"username": "你的账号", "password": "你的密码"}
+
+
+5. 跑第一批 3 个 alpha
+
+python run_workflow.py first --config config.json
+
+说明：非顾问权限下，每次最多只会回测 3 个 alpha。
+
+
+6. 查看断点状态
+
+python run_workflow.py status --config config.json
+
+
+7. 如果想一直跑，直到你手动停止
+
+python run_workflow.py first-loop --config config.json
+
+说明：
+
+- 它不是一次性无限并发。
+- 它每一轮最多回测 3 个 alpha。
+- 每轮结束后默认等待 6 秒，再跑下一轮。
+- 你按 Ctrl+C 就会停止。
+- 不要用 Ctrl+Z。Ctrl+Z 是挂起进程，不是停止；如果已经挂起，输入 fg 恢复后再按 Ctrl+C。
+- 已完成结果会持续写入 results/simulation_results.csv。
+- 停止后以后再运行同一个命令，会跳过已经记录过的表达式继续跑。
+- 如果某个 alpha 满足 fitness > 1.3 且 sharpe > 1.6，终端会标注 HIGH QUALITY。
+
+如果想改每轮之间的等待时间，修改 config.json：
+
+{
+  "loop_sleep_seconds": 6
+}
+
+如果网络或代理临时断开，脚本会短暂停顿后重新登录。这个等待时间也可以改：
+
+{
+  "error_sleep_seconds": 6
+}
+
+如果想限制最多连续跑多少轮，比如最多跑 10 轮，修改 config.json：
+
+{
+  "loop_max_batches": 10
+}
+
+如果想不限制轮数，保持：
+
+{
+  "loop_max_batches": null
+}
+
+
+8. 如果中途被打断
+
+回来后直接重新跑同一个命令：
+
+python run_workflow.py first --config config.json
+
+脚本会读取 results/simulation_results.csv，跳过已经记录过的表达式，继续测后面的。
+
+注意：如果刚好在某个 alpha 正在回测、还没写入结果时被强制中断，这一个 alpha 下次可能会再测一次；已经写入日志的不会重复。
+
+
+9. 查看回测反馈报告
+
+python run_workflow.py report --config config.json
+
+
+10. 筛选高质量 alpha
+
+筛选条件：
+
+fitness > 1.3
+sharpe > 1.6
+
+运行：
+
+python run_workflow.py select --config config.json
+
+结果会打印表格，也会写入：
+
+results/high_quality_alphas.csv
+results/high_quality_alphas.txt
+
+
+11. 最常用的命令
+
+python run_workflow.py first --config config.json
+python run_workflow.py first-loop --config config.json
+python run_workflow.py status --config config.json
+python run_workflow.py select --config config.json
+
+
+12. AI 闭环工作流 DeepSeek 版本
+
+先配置 DeepSeek API Key。推荐用环境变量：
+
+export DEEPSEEK_API_KEY="你的 deepseek api key"
+
+也可以写入 config.json：
+
+{
+  "ai_api_key": "你的 deepseek api key",
+  "ai_model": "deepseek-chat"
+}
+
+AI 闭环最小流程：
+
+python run_workflow.py crawl-fields --config config.json
+python run_workflow.py propose --config config.json
+python run_workflow.py enqueue --config config.json
+python run_workflow.py backtest-loop --config config.json
+python run_workflow.py review --config config.json
+python run_workflow.py improve --config config.json
+python run_workflow.py enqueue --config config.json
+python run_workflow.py backtest-loop --config config.json
+
+每个命令的作用：
+
+crawl-fields
+拉取当前 config.json 里 dataset_id 对应的数据字段，生成 dataset_catalog/fields_for_ai.jsonl。
+
+propose
+调用 DeepSeek，根据字段和历史回测反馈生成 alpha 候选，写入 ideas/alpha_ideas.jsonl。
+
+enqueue
+把 AI 候选表达式去重后加入 state/backtest_queue.jsonl。
+
+backtest-loop
+从队列里每轮取最多 3 个 alpha 回测，支持 Ctrl+C 停止和下次续跑。
+
+review
+调用 DeepSeek，根据 results/simulation_feedback.jsonl 复盘回测结果，写入 ideas/ai_review.jsonl。
+
+improve
+根据 AI 复盘里的 next_expression 生成改进版 alpha，写入 ideas/improved_ideas.jsonl。
+
+注意：
+
+- 不会自动提交 production。
+- 每轮仍然最多回测 3 个。
+- 已经回测过的表达式会自动跳过。
+- ideas/、state/、results/ 都是本地运行数据，不建议开源提交。

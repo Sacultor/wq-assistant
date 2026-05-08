@@ -1,5 +1,6 @@
 import argparse
 import json
+from time import sleep
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -17,12 +18,22 @@ from machine_lib import (
     multi_simulate,
     prepare_alpha_list,
     print_feedback_report,
+    print_resume_status,
     process_datafields,
     prune,
     select_high_quality_alphas,
     trade_when_factory,
     ts_ops,
 )
+from wq_assistant.ai_client import AIConfigError
+from wq_assistant.ai_workflow import (
+    run_backtest_loop,
+    run_enqueue,
+    run_improve,
+    run_propose,
+    run_review,
+)
+from crawl_datasets import crawl as crawl_datasets_command
 
 
 DEFAULT_CONFIG = {
@@ -36,9 +47,11 @@ DEFAULT_CONFIG = {
     "max_first_order": 100,
     "max_second_order": 200,
     "max_third_order": 200,
-    "task_size": 10,
-    "pool_size": 3,
-    "simulation_mode": "auto",
+    "max_alphas_per_run": 3,
+    "task_size": 3,
+    "pool_size": 1,
+    "simulation_mode": "single",
+    "alpha_shuffle": False,
     "results_csv": str(DEFAULT_RESULTS_CSV),
     "skip_logged": True,
     "first_order_sharpe": 1.2,
@@ -63,6 +76,36 @@ DEFAULT_CONFIG = {
     "select_min_fitness": 1.3,
     "select_top_n": 50,
     "select_expr_width": 96,
+    "loop_sleep_seconds": 6,
+    "error_sleep_seconds": 6,
+    "loop_max_batches": None,
+    "ai_api_key": "",
+    "ai_base_url": "https://api.deepseek.com/chat/completions",
+    "ai_model": "deepseek-chat",
+    "ai_timeout_seconds": 120,
+    "ai_temperature": 0.2,
+    "ai_proposal_count": 20,
+    "ai_max_fields": 80,
+    "ai_feedback_limit": 80,
+    "idea_id_prefix": "ai",
+    "fields_for_ai_path": "dataset_catalog/fields_for_ai.jsonl",
+    "feedback_for_ai_path": "results/simulation_feedback.jsonl",
+    "ideas_path": "ideas/alpha_ideas.jsonl",
+    "improved_ideas_path": "ideas/improved_ideas.jsonl",
+    "ai_review_path": "ideas/ai_review.jsonl",
+    "backtest_queue_path": "state/backtest_queue.jsonl",
+    "queue_max_attempts": 2,
+    "crawl_output_dir": "dataset_catalog",
+    "crawl_dataset": [],
+    "crawl_dataset_name": [],
+    "crawl_limit_datasets": None,
+    "crawl_preview": 20,
+    "crawl_no_resume": False,
+    "crawl_max_retries": 12,
+    "crawl_page_delay": 1.5,
+    "crawl_jitter": 0.5,
+    "crawl_request_timeout": 30,
+    "crawl_pause_between_datasets": 3,
 }
 
 
@@ -93,16 +136,20 @@ def make_pools(alpha_list, config):
 
 
 def run_simulations(alpha_list, config, max_count):
+    max_alphas_per_run = config.get("max_alphas_per_run")
+    if max_alphas_per_run is not None:
+        max_count = min(int(max_count), int(max_alphas_per_run))
+
     alpha_list = prepare_alpha_list(
         alpha_list,
         max_count=max_count,
-        shuffle=True,
+        shuffle=bool(config.get("alpha_shuffle", False)),
         skip_logged=bool(config["skip_logged"]),
         results_csv=config["results_csv"],
     )
     if not alpha_list:
         print("No new alpha expressions to simulate")
-        return
+        return 0
     pools = make_pools(alpha_list, config)
     multi_simulate(
         pools,
@@ -112,10 +159,12 @@ def run_simulations(alpha_list, config, max_count):
         0,
         mode=config["simulation_mode"],
         results_csv=config["results_csv"],
+        error_sleep_seconds=float(config.get("error_sleep_seconds", 6)),
     )
+    return len(alpha_list)
 
 
-def run_first_order(config):
+def build_first_order_alpha_list(config):
     s = login()
     df = get_datafields(
         s,
@@ -127,8 +176,46 @@ def run_first_order(config):
     fields = process_datafields(df, config["data_type"])
     ops = config.get("first_order_ops") or ts_ops
     expressions = first_order_factory(fields, ops)
-    alpha_list = [(expr, int(config["init_decay"])) for expr in expressions]
-    run_simulations(alpha_list, config, int(config["max_first_order"]))
+    return [(expr, int(config["init_decay"])) for expr in expressions]
+
+
+def run_first_order(config):
+    alpha_list = build_first_order_alpha_list(config)
+    return run_simulations(alpha_list, config, int(config["max_first_order"]))
+
+
+def run_first_order_loop(config):
+    batch = 0
+    sleep_seconds = float(config.get("loop_sleep_seconds", 6))
+    max_batches = config.get("loop_max_batches")
+    max_batches = int(max_batches) if max_batches is not None else None
+
+    print("Continuous first-order mode started.")
+    print("Press Ctrl+C to stop. Completed results are saved after each simulation.")
+    print(
+        "Each batch runs at most %s alpha(s), then waits %.0f seconds."
+        % (config.get("max_alphas_per_run", 3), sleep_seconds)
+    )
+    print("Building first-order alpha queue once for this loop...")
+    alpha_list = build_first_order_alpha_list(config)
+
+    try:
+        while True:
+            if max_batches is not None and batch >= max_batches:
+                print(f"Reached loop_max_batches={max_batches}; stopping.")
+                break
+            batch += 1
+            print(f"\n=== First-order batch {batch} ===")
+            simulated_count = run_simulations(alpha_list, config, int(config["max_first_order"]))
+            if simulated_count == 0:
+                print("No new first-order alpha expressions remain; stopping loop.")
+                break
+            print_resume_status(config["results_csv"], recent_n=3)
+            if sleep_seconds > 0:
+                print(f"Waiting {sleep_seconds:.0f}s before next batch...")
+                sleep(sleep_seconds)
+    except KeyboardInterrupt:
+        print("\nStopped by user. You can resume with the same command later.")
 
 
 def run_second_order(config):
@@ -242,11 +329,68 @@ def run_select(config):
     )
 
 
+def run_status(config):
+    print_resume_status(config["results_csv"])
+
+
+def run_crawl_fields(config):
+    args = argparse.Namespace(
+        region=config["region"],
+        universe=config["universe"],
+        delay=int(config.get("delay", 1)),
+        dataset=config.get("crawl_dataset") or [config["dataset_id"]],
+        dataset_name=config.get("crawl_dataset_name") or None,
+        limit_datasets=config.get("crawl_limit_datasets"),
+        output_dir=config.get("crawl_output_dir", "dataset_catalog"),
+        preview=int(config.get("crawl_preview", 20)),
+        no_resume=bool(config.get("crawl_no_resume", False)),
+        max_retries=int(config.get("crawl_max_retries", 12)),
+        page_delay=float(config.get("crawl_page_delay", 1.5)),
+        jitter=float(config.get("crawl_jitter", 0.5)),
+        request_timeout=float(config.get("crawl_request_timeout", 30)),
+        pause_between_datasets=float(config.get("crawl_pause_between_datasets", 3)),
+    )
+    crawl_datasets_command(args)
+
+
+def run_ai_command(fn, config):
+    try:
+        return fn(config)
+    except AIConfigError as e:
+        print(e)
+        print("Example:")
+        print('  export DEEPSEEK_API_KEY="your_api_key"')
+        print("or set ai_api_key in config.json.")
+        return None
+    except FileNotFoundError as e:
+        print(e)
+        print("If this is about fields_for_ai.jsonl, run:")
+        print("  python run_workflow.py crawl-fields --config config.json")
+        return None
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run the WorldQuant Brain alpha mining workflow")
     parser.add_argument(
         "action",
-        choices=["first", "second", "third", "retest-decay", "submit-check", "report", "select", "all"],
+        choices=[
+            "first",
+            "first-loop",
+            "second",
+            "third",
+            "retest-decay",
+            "submit-check",
+            "report",
+            "select",
+            "status",
+            "crawl-fields",
+            "propose",
+            "enqueue",
+            "backtest-loop",
+            "review",
+            "improve",
+            "all",
+        ],
         help="Workflow step to run",
     )
     parser.add_argument("--config", default="config.example.json", help="Path to JSON config file")
@@ -256,6 +400,8 @@ def main():
 
     if args.action in {"first", "all"}:
         run_first_order(config)
+    if args.action == "first-loop":
+        run_first_order_loop(config)
     if args.action in {"second", "all"}:
         run_second_order(config)
     if args.action in {"third", "all"}:
@@ -268,6 +414,20 @@ def main():
         run_report(config)
     if args.action in {"select", "all"}:
         run_select(config)
+    if args.action == "status":
+        run_status(config)
+    if args.action == "crawl-fields":
+        run_crawl_fields(config)
+    if args.action == "propose":
+        run_ai_command(run_propose, config)
+    if args.action == "enqueue":
+        run_enqueue(config)
+    if args.action == "backtest-loop":
+        run_backtest_loop(config)
+    if args.action == "review":
+        run_ai_command(run_review, config)
+    if args.action == "improve":
+        run_improve(config)
 
 
 if __name__ == "__main__":
