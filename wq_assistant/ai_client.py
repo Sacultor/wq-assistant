@@ -3,6 +3,7 @@ import os
 import re
 
 import requests
+from urllib.parse import urlparse
 
 
 class AIConfigError(RuntimeError):
@@ -19,7 +20,7 @@ class DeepSeekClient:
         temperature=0.2,
     ):
         self.api_key = api_key or os.environ.get("DEEPSEEK_API_KEY")
-        self.base_url = base_url
+        self.base_url = normalize_chat_url(base_url)
         self.model = model
         self.timeout = timeout
         self.temperature = temperature
@@ -53,6 +54,16 @@ class DeepSeekClient:
         return data["choices"][0]["message"]["content"]
 
 
+def normalize_chat_url(base_url):
+    base_url = str(base_url).strip().rstrip("/")
+    parsed = urlparse(base_url)
+    if parsed.path in {"", "/"}:
+        return base_url + "/v1/chat/completions"
+    if parsed.path.endswith("/v1"):
+        return base_url + "/chat/completions"
+    return base_url
+
+
 def make_ai_client(config):
     return DeepSeekClient(
         api_key=config.get("ai_api_key") or os.environ.get("DEEPSEEK_API_KEY"),
@@ -75,4 +86,3 @@ def parse_json_response(text):
         if not match:
             raise
         return json.loads(match.group(1))
-

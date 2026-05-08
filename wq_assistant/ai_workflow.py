@@ -41,6 +41,17 @@ def feedback_path(config):
     return project_path(config, "feedback_for_ai_path", "results/simulation_feedback.jsonl")
 
 
+def operator_notes_path(config):
+    return project_path(config, "operator_notes_path", "docs/brain_operators.md")
+
+
+def read_text_if_exists(path):
+    path = Path(path)
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8")
+
+
 def existing_expressions(config):
     expressions = set(load_logged_expressions(config.get("results_csv", DEFAULT_RESULTS_CSV)))
     for path in [ideas_path(config), improved_ideas_path(config), queue_path(config)]:
@@ -72,6 +83,8 @@ def normalize_idea(raw, idea_id, source="ai"):
         "expression": expression,
         "decay": int(raw.get("decay") or 6),
         "reason": str(raw.get("reason", raw.get("research_basis", ""))).strip(),
+        "field_analysis": str(raw.get("field_analysis", "")).strip(),
+        "operator_plan": str(raw.get("operator_plan", "")).strip(),
         "expected_effect": str(raw.get("expected_effect", "")).strip(),
         "risk": str(raw.get("risk", "")).strip(),
         "status": "pending",
@@ -82,7 +95,7 @@ def next_idea_id(existing_count, prefix):
     return f"{prefix}_{existing_count + 1:04d}"
 
 
-def make_propose_prompt(config, fields, feedback, existing_exprs):
+def make_propose_prompt(config, fields, operator_notes, feedback, existing_exprs):
     max_ideas = int(config.get("ai_proposal_count", 20))
     return f"""
 You are helping generate WorldQuant Brain FASTEXPR alpha ideas.
@@ -90,20 +103,20 @@ You are helping generate WorldQuant Brain FASTEXPR alpha ideas.
 Constraints:
 - Return ONLY a valid JSON array.
 - Generate at most {max_ideas} ideas.
-- Each idea must include: hypothesis, fields_used, expression, decay, reason, expected_effect, risk.
+- Each idea must include: hypothesis, fields_used, field_analysis, operator_plan, expression, decay, reason, expected_effect, risk.
 - Use only fields shown in the provided field records.
+- Use the operator notes to choose transforms intentionally.
 - Avoid expressions already tested or queued.
 - Prefer simple, interpretable expressions.
 - Use FASTEXPR syntax only.
 - Do not submit anything; only propose expressions for later backtesting.
 - Account is non-consultant, so ideas will be backtested slowly in batches of 3.
+- Think in two steps for every idea:
+  1. Analyze what the field likely means and what anomaly it may capture.
+  2. Choose operators that match the field behavior, then produce one expression.
 
 Default preprocessing pattern for raw matrix fields:
 winsorize(ts_backfill(FIELD, 120), std=4)
-
-Useful operators:
-rank, zscore, normalize, ts_rank, ts_delta, ts_mean, ts_sum, ts_zscore,
-group_neutralize, group_rank, group_zscore, trade_when.
 
 Recent feedback can guide you:
 - High turnover: smooth more, increase decay, use ts_mean or longer windows.
@@ -112,6 +125,9 @@ Recent feedback can guide you:
 
 Fields:
 {fields}
+
+Operator notes:
+{operator_notes}
 
 Recent backtest feedback:
 {feedback}
@@ -128,11 +144,12 @@ def run_propose(config):
             f"No field records found at {fields_path(config)}. Run crawl_datasets.py first."
         )
     feedback = load_recent_jsonl(feedback_path(config), int(config.get("ai_feedback_limit", 80)))
+    operator_notes = read_text_if_exists(operator_notes_path(config))
     used = existing_expressions(config)
 
     client = make_ai_client(config)
     system = "You are a quantitative researcher. Respond only with JSON."
-    prompt = make_propose_prompt(config, fields, feedback, used)
+    prompt = make_propose_prompt(config, fields, operator_notes, feedback, used)
     content = client.chat(system, prompt)
     parsed = parse_json_response(content)
     if isinstance(parsed, dict):

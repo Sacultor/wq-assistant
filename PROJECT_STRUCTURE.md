@@ -18,7 +18,19 @@ This repo keeps source code and local runtime data separate.
 
 - `README.md`: project overview and commands.
 - `docs/使用方法.txt`: quick Chinese usage guide.
+- `docs/brain_operators.md`: compact FASTEXPR operator notes used by the AI proposal step.
 - `docs/*.pdf`: local reference papers. Check licensing before publishing them.
+
+## What You May Still See In VS Code
+
+The following folders can still appear in the file tree during local use. That is normal:
+
+- `__pycache__/`: Python bytecode cache.
+- `.vscode/`: local editor settings.
+- `dataset_catalog/`: local crawled fields.
+- `results/`: local backtest results.
+
+They are ignored by Git and should not be committed.
 
 ## Examples
 
@@ -43,4 +55,3 @@ These are ignored by Git:
 - `.env`
 - `__pycache__/`
 - `.vscode/`
-

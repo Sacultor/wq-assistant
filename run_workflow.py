@@ -89,6 +89,7 @@ DEFAULT_CONFIG = {
     "ai_feedback_limit": 80,
     "idea_id_prefix": "ai",
     "fields_for_ai_path": "dataset_catalog/fields_for_ai.jsonl",
+    "operator_notes_path": "docs/brain_operators.md",
     "feedback_for_ai_path": "results/simulation_feedback.jsonl",
     "ideas_path": "ideas/alpha_ideas.jsonl",
     "improved_ideas_path": "ideas/improved_ideas.jsonl",

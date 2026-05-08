@@ -1,5 +1,8 @@
 import argparse
+import json
 import re
+from random import uniform
+from time import sleep
 from pathlib import Path
 
 import pandas as pd
@@ -59,7 +62,73 @@ def flatten_list_values(df):
     return df
 
 
-def fetch_dataset_fields(s, dataset_id, region, universe, delay, output_dir, resume=True):
+def set_or_insert_column(df, position, column, value):
+    if column in df.columns:
+        df[column] = value
+    else:
+        df.insert(position, column, value)
+
+
+def json_safe(value):
+    if isinstance(value, dict):
+        return {key: json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [json_safe(item) for item in value]
+    if pd.isna(value):
+        return None
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except ValueError:
+            return value
+    return value
+
+
+def get_datafields_with_retry(
+    s,
+    dataset_id,
+    region,
+    universe,
+    delay,
+    max_retries=12,
+    jitter=1,
+):
+    for attempt in range(1, max_retries + 1):
+        try:
+            return get_datafields(
+                s,
+                dataset_id=dataset_id,
+                region=region,
+                universe=universe,
+                delay=delay,
+            )
+        except Exception as e:
+            message = str(e)
+            if "rate limit" not in message.lower() and "429" not in message:
+                raise
+            if attempt >= max_retries:
+                raise
+            wait_seconds = min(120, 2 ** attempt) + uniform(0, jitter)
+            print(
+                f"Rate limited while fetching {dataset_id}; "
+                f"waiting {wait_seconds:.0f}s ({attempt}/{max_retries})"
+            )
+            sleep(wait_seconds)
+
+
+def fetch_dataset_fields(
+    s,
+    dataset_id,
+    region,
+    universe,
+    delay,
+    output_dir,
+    resume=True,
+    max_retries=12,
+    page_delay=3,
+    jitter=1,
+    timeout=30,
+):
     dataset_path = output_dir / "by_dataset" / f"{safe_filename(dataset_id)}.csv"
     if resume and dataset_path.exists():
         print(f"Skipping {dataset_id}; existing file found")
@@ -67,24 +136,63 @@ def fetch_dataset_fields(s, dataset_id, region, universe, delay, output_dir, res
         return df
 
     print(f"Fetching data fields for dataset={dataset_id}")
-    df = get_datafields(
+    if page_delay > 0:
+        sleep(max(0, page_delay + uniform(0, jitter)))
+    df = get_datafields_with_retry(
         s,
         dataset_id=dataset_id,
         region=region,
         universe=universe,
         delay=delay,
+        max_retries=max_retries,
+        jitter=jitter,
     )
     if df.empty:
         print(f"No fields found for dataset={dataset_id}")
         return df
 
     df = flatten_list_values(df)
-    df.insert(0, "dataset_id", dataset_id)
-    df.insert(1, "region", region)
-    df.insert(2, "universe", universe)
-    df.insert(3, "delay", delay)
+    set_or_insert_column(df, 0, "dataset_id", dataset_id)
+    set_or_insert_column(df, 1, "region", region)
+    set_or_insert_column(df, 2, "universe", universe)
+    set_or_insert_column(df, 3, "delay", delay)
     save_csv(df, dataset_path)
     return df
+
+
+def write_fields_for_ai_jsonl(fields_df, datasets_df, path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    dataset_meta = {}
+    if not datasets_df.empty and "id" in datasets_df.columns:
+        for _, row in datasets_df.iterrows():
+            dataset_meta[str(row.get("id"))] = {
+                "dataset_id": row.get("id"),
+                "dataset_name": row.get("name"),
+                "category": row.get("category"),
+                "subcategory": row.get("subcategory"),
+                "description": row.get("description"),
+            }
+    with open(path, "w", encoding="utf-8") as f:
+        for _, row in fields_df.iterrows():
+            dataset_id = str(row.get("dataset_id", ""))
+            record = {
+                "dataset": dataset_meta.get(dataset_id, {"dataset_id": dataset_id}),
+                "field": {
+                    "id": row.get("id"),
+                    "description": row.get("description") or row.get("name"),
+                    "type": row.get("type"),
+                    "coverage": row.get("coverage"),
+                    "date_coverage": row.get("dateCoverage") or row.get("date_coverage"),
+                    "alphas": row.get("alphaCount") or row.get("alphas"),
+                },
+                "context": {
+                    "region": row.get("region"),
+                    "universe": row.get("universe"),
+                    "delay": row.get("delay"),
+                },
+            }
+            f.write(json.dumps(json_safe(record), ensure_ascii=False) + "\n")
+    print(f"Wrote {path}")
 
 
 def write_readable_txt(fields_df, datasets_df, path):
@@ -157,6 +265,10 @@ def crawl(args):
                 args.delay,
                 output_dir,
                 resume=not args.no_resume,
+                max_retries=getattr(args, "max_retries", 12),
+                page_delay=getattr(args, "page_delay", 3),
+                jitter=getattr(args, "jitter", 1),
+                timeout=getattr(args, "request_timeout", 30),
             )
             if not fields_df.empty:
                 all_fields.append(fields_df)
@@ -174,6 +286,7 @@ def crawl(args):
     readable_cols = [col for col in DEFAULT_COLUMNS if col in fields_all.columns]
     extra_cols = [col for col in fields_all.columns if col not in readable_cols]
     save_csv(fields_all[readable_cols + extra_cols], output_dir / "datafields_readable.csv")
+    write_fields_for_ai_jsonl(fields_all, datasets_df, output_dir / "fields_for_ai.jsonl")
     write_readable_txt(fields_all, datasets_df, output_dir / "datafields_readable.txt")
 
 
@@ -192,6 +305,10 @@ def parse_args():
     parser.add_argument("--limit-datasets", type=int, help="Limit number of datasets when fetching all")
     parser.add_argument("--output-dir", default="dataset_catalog", help="Output folder")
     parser.add_argument("--no-resume", action="store_true", help="Re-fetch datasets even if CSV files exist")
+    parser.add_argument("--max-retries", type=int, default=12, help="Maximum retries after API 429 rate limits")
+    parser.add_argument("--page-delay", type=float, default=3, help="Seconds to wait between field pages")
+    parser.add_argument("--jitter", type=float, default=1, help="Extra random seconds added to page waits")
+    parser.add_argument("--request-timeout", type=float, default=30, help="HTTP request timeout in seconds")
     return parser.parse_args()
 
 
