@@ -15,7 +15,13 @@ The project is intended for research automation. It does not auto-submit alphas 
 
 ## Recommended Simple Workflow
 
-Use this path if you do not want to edit code.
+Use this path if you do not want to edit Python code.
+
+0. Install dependencies:
+
+```bash
+python -m pip install -r requirements.txt
+```
 
 1. Create your local config:
 
@@ -49,26 +55,60 @@ python run_workflow.py first --config config.json
 python run_workflow.py report --config config.json
 ```
 
-5. Run second-order and third-order expansion only if the report shows promising candidates:
+5. Select high-quality alphas in a table, using the default rule `fitness > 1.3` and `sharpe > 1.6`:
+
+```bash
+python run_workflow.py select --config config.json
+```
+
+This prints a table with `#`, `Sharpe`, `Fit`, `When`, and `Alpha Expression`, and writes:
+
+- `results/high_quality_alphas.csv`: full selected rows.
+- `results/high_quality_alphas.txt`: readable table output.
+
+6. Run second-order and third-order expansion only if the report shows promising candidates:
 
 ```bash
 python run_workflow.py second --config config.json
 python run_workflow.py third --config config.json
 ```
 
-6. Re-test high-turnover but promising alphas with higher decay:
+7. Re-test high-turnover but promising alphas with higher decay:
 
 ```bash
 python run_workflow.py retest-decay --config config.json
 ```
 
-7. Check final candidates and mark passing alphas on Brain:
+8. Check final candidates and mark passing alphas on Brain:
 
 ```bash
 python run_workflow.py submit-check --config config.json
 ```
 
 The workflow writes every completed simulation to `results/simulation_results.csv`. Future runs skip already tested expressions by default, so the workflow keeps learning from previous results instead of repeating the same work.
+
+## Commands
+
+```bash
+python run_workflow.py first --config config.json        # generate and simulate first-order alphas
+python run_workflow.py report --config config.json       # summarize all local backtest feedback
+python run_workflow.py select --config config.json       # print/write fitness>1.3 and sharpe>1.6 alphas
+python run_workflow.py second --config config.json       # expand promising alphas with group operators
+python run_workflow.py third --config config.json        # expand promising alphas with trade_when events
+python run_workflow.py retest-decay --config config.json # retest high-turnover alphas with higher decay
+python run_workflow.py submit-check --config config.json # check final candidates
+```
+
+The high-quality selection thresholds are configurable:
+
+```json
+{
+  "select_min_sharpe": 1.6,
+  "select_min_fitness": 1.3,
+  "select_top_n": 50,
+  "select_expr_width": 96
+}
+```
 
 ## Data Field Crawler
 
@@ -86,6 +126,12 @@ Fetch only one or several datasets:
 python crawl_datasets.py --region USA --universe TOP3000 --dataset analyst4 --dataset news12
 ```
 
+Fetch the fields shown under a dataset page by dataset name/search text:
+
+```bash
+python crawl_datasets.py --region USA --universe TOP3000 --dataset-name "Company Fundamental"
+```
+
 Test with only the first few datasets:
 
 ```bash
@@ -95,12 +141,31 @@ python crawl_datasets.py --region USA --universe TOP3000 --limit-datasets 5
 Outputs are written to `dataset_catalog/`:
 
 - `field_dictionary.csv`: main table of fields, with dataset id, field id, type, name, and description.
+- Main columns match the Brain Fields table: `field`, `description`, `type`, `coverage`, `date_coverage`, `alphas`.
+- `fields_for_ai.jsonl`: one field per line, with dataset metadata and field context, suitable for feeding to an AI model.
 - `fields_by_dataset.txt`: readable text index of fields grouped by dataset.
 - `datafields_raw_all.csv`: raw field table returned by the API.
 - `datasets.csv`: dataset index, used only to know which datasets were scanned.
 - `by_dataset/*.csv`: raw fields for each dataset.
 
-The crawler resumes by default. If a per-dataset CSV already exists, it skips that dataset. Use `--no-resume` to force a fresh fetch.
+The crawler resumes by default. If a per-dataset CSV already exists, it skips that dataset. Use `--no-resume` to force a fresh fetch. The defaults are intentionally gentle: it waits between dataset pages, adds random jitter, honors `Retry-After` on 429 responses, and reuses the first field-page response instead of requesting offset 0 twice. You can slow it further with:
+
+```bash
+python crawl_datasets.py --region USA --universe TOP3000 --page-delay 3 --jitter 2 --pause-between-datasets 8
+```
+
+## Backtest Feedback For AI
+
+Every completed simulation is appended to:
+
+- `results/simulation_results.csv`: table format for spreadsheet analysis and duplicate skipping.
+- `results/simulation_feedback.jsonl`: one JSON record per backtest with band, detected issues, suggested next actions, operators, fields, metrics, and expression.
+
+Running the report command also writes:
+
+- `results/feedback_for_ai.jsonl`: regenerated full feedback log for AI analysis.
+- `results/feedback_summary.json`: compact diagnostic summary with issue counts, operator/field counts, thresholds, and top candidates.
+- `results/candidate_alphas.csv`: filtered candidate table.
 
 ## Credentials
 
@@ -322,6 +387,12 @@ Always verify final candidates on the Brain website before submitting.
 
 如果你不想改代码，按这个流程走。
 
+0. 安装依赖：
+
+```bash
+python -m pip install -r requirements.txt
+```
+
 1. 创建自己的本地配置：
 
 ```bash
@@ -354,26 +425,60 @@ python run_workflow.py first --config config.json
 python run_workflow.py report --config config.json
 ```
 
-5. 如果报告里有不错的候选，再运行二阶和三阶扩展：
+5. 按 `fitness > 1.3` 且 `sharpe > 1.6` 筛选高质量 alpha，并打印成表格：
+
+```bash
+python run_workflow.py select --config config.json
+```
+
+这个命令会输出 `#`、`Sharpe`、`Fit`、`When`、`Alpha Expression` 表格，并写入：
+
+- `results/high_quality_alphas.csv`：完整筛选结果。
+- `results/high_quality_alphas.txt`：可读表格结果。
+
+6. 如果报告里有不错的候选，再运行二阶和三阶扩展：
 
 ```bash
 python run_workflow.py second --config config.json
 python run_workflow.py third --config config.json
 ```
 
-6. 对高换手但表现不错的 alpha，用更高 decay 重新测试：
+7. 对高换手但表现不错的 alpha，用更高 decay 重新测试：
 
 ```bash
 python run_workflow.py retest-decay --config config.json
 ```
 
-7. 检查最终候选，并把通过检查的 alpha 在 Brain 上标注出来：
+8. 检查最终候选，并把通过检查的 alpha 在 Brain 上标注出来：
 
 ```bash
 python run_workflow.py submit-check --config config.json
 ```
 
 每次完成的回测都会写入 `results/simulation_results.csv`。后续运行默认会跳过已经测过的表达式，所以工作流会基于历史反馈继续推进，而不是重复做同样的回测。
+
+## 常用命令
+
+```bash
+python run_workflow.py first --config config.json        # 生成并回测一阶 alpha
+python run_workflow.py report --config config.json       # 汇总本地回测反馈
+python run_workflow.py select --config config.json       # 打印/写入 fitness>1.3 且 sharpe>1.6 的 alpha
+python run_workflow.py second --config config.json       # 对候选 alpha 做 group 二阶扩展
+python run_workflow.py third --config config.json        # 对候选 alpha 做 trade_when 三阶扩展
+python run_workflow.py retest-decay --config config.json # 用更高 decay 复测高换手 alpha
+python run_workflow.py submit-check --config config.json # 检查最终候选
+```
+
+高质量 alpha 的筛选阈值可以在 `config.json` 里改：
+
+```json
+{
+  "select_min_sharpe": 1.6,
+  "select_min_fitness": 1.3,
+  "select_top_n": 50,
+  "select_expr_width": 96
+}
+```
 
 ## 数据字段爬取工具
 
@@ -391,6 +496,12 @@ python crawl_datasets.py --region USA --universe TOP3000 --delay 1
 python crawl_datasets.py --region USA --universe TOP3000 --dataset analyst4 --dataset news12
 ```
 
+按 dataset 页面名称或关键词爬取 Fields 表：
+
+```bash
+python crawl_datasets.py --region USA --universe TOP3000 --dataset-name "Company Fundamental"
+```
+
 先用前几个数据集测试：
 
 ```bash
@@ -400,12 +511,37 @@ python crawl_datasets.py --region USA --universe TOP3000 --limit-datasets 5
 输出会保存在 `dataset_catalog/`：
 
 - `field_dictionary.csv`：最主要的字段总表，包含 dataset id、field id、字段类型、字段名称和字段描述。
+- 主列会对应 Brain 页面里的 Fields 表：`field`、`description`、`type`、`coverage`、`date_coverage`、`alphas`。
+- `fields_for_ai.jsonl`：一行一个字段，包含 dataset 元信息和字段上下文，适合直接喂给 AI 做思路分析。
 - `fields_by_dataset.txt`：按 dataset 分组的可读字段索引。
 - `datafields_raw_all.csv`：API 返回的原始字段总表。
 - `datasets.csv`：dataset 索引，只用于确认扫描了哪些 dataset。
 - `by_dataset/*.csv`：每个 dataset 单独的原始字段表。
 
-脚本默认支持断点续爬。如果某个 dataset 的 CSV 已经存在，就会跳过它。使用 `--no-resume` 可以强制重新爬取。
+脚本默认支持断点续爬。如果某个 dataset 的 CSV 已经存在，就会跳过它。使用 `--no-resume` 可以强制重新爬取。默认策略偏温和：分页请求之间会等待并加随机抖动，遇到 429 会遵守 `Retry-After`，并且会复用第一页响应，避免重复请求 offset 0。想更慢一点可以这样：
+
+```bash
+python crawl_datasets.py --region USA --universe TOP3000 --page-delay 3 --jitter 2 --pause-between-datasets 8
+```
+
+## 回测反馈与 AI 分析
+
+每次 simulation 完成后会自动写入：
+
+- `results/simulation_results.csv`：表格格式，方便筛选，也用于以后跳过重复表达式。
+- `results/simulation_feedback.jsonl`：一行一个回测反馈，包含分层标签、问题类型、建议动作、operator、字段、指标和表达式。
+
+执行报告命令：
+
+```bash
+python run_workflow.py report --config config.json
+```
+
+还会生成：
+
+- `results/feedback_for_ai.jsonl`：重新汇总后的 AI 输入文件。
+- `results/feedback_summary.json`：诊断摘要，包含问题计数、operator/field 计数、阈值和候选 alpha。
+- `results/candidate_alphas.csv`：通过阈值筛选后的候选表。
 
 ## 凭据配置
 

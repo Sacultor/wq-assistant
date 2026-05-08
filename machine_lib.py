@@ -8,6 +8,7 @@ import pandas as pd
 import random
 import pickle
 import csv
+import re
 from itertools import product
 from itertools import combinations
 from collections import defaultdict
@@ -17,6 +18,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 CREDENTIALS_PATH = PROJECT_ROOT / "credentials.txt"
 RESULTS_DIR = PROJECT_ROOT / "results"
 DEFAULT_RESULTS_CSV = RESULTS_DIR / "simulation_results.csv"
+DEFAULT_FEEDBACK_JSONL = RESULTS_DIR / "simulation_feedback.jsonl"
 
 
 def load_credentials():
@@ -97,6 +99,124 @@ def result_row_from_metrics(metrics, region=None, universe=None, neutralization=
     }
 
 
+def classify_alpha_feedback(metrics):
+    sharpe = numeric_or_none(metrics.get("sharpe"))
+    fitness = numeric_or_none(metrics.get("fitness"))
+    turnover = numeric_or_none(metrics.get("turnover"))
+    margin = numeric_or_none(metrics.get("margin"))
+    decay = numeric_or_none(metrics.get("decay"))
+
+    issues = []
+    next_actions = []
+    if sharpe is not None and sharpe < 0:
+        issues.append("negative_sharpe")
+        next_actions.append("try_reversing_signal")
+    if sharpe is not None and abs(sharpe) < 1.0:
+        issues.append("weak_sharpe")
+        next_actions.append("deprioritize_or_change_operator")
+    if fitness is not None and fitness < 1.0:
+        issues.append("low_fitness")
+        next_actions.append("improve_stability_or_margin")
+    if turnover is not None and turnover > 0.7:
+        issues.append("very_high_turnover")
+        next_actions.append(f"retest_with_decay_{adjusted_decay(decay, turnover)}")
+    elif turnover is not None and turnover > 0.4:
+        issues.append("high_turnover")
+        next_actions.append(f"consider_decay_{adjusted_decay(decay, turnover)}")
+    if margin is not None and margin < 0.001:
+        issues.append("low_margin")
+        next_actions.append("prefer_smoother_or_more_selective_expression")
+
+    if sharpe is not None and fitness is not None and turnover is not None:
+        if sharpe >= 1.58 and fitness >= 1.0 and turnover <= 0.7:
+            band = "submission_candidate"
+        elif sharpe >= 1.2 and fitness >= 1.0:
+            band = "research_candidate"
+        elif sharpe <= -1.2 and fitness <= -1.0:
+            band = "reverse_candidate"
+        else:
+            band = "reject_or_low_priority"
+    else:
+        band = "unknown"
+
+    return {
+        "band": band,
+        "issues": list(dict.fromkeys(issues)),
+        "next_actions": list(dict.fromkeys(next_actions)),
+    }
+
+
+def numeric_or_none(value):
+    if pd.isna(value):
+        return None
+    if hasattr(value, "item"):
+        value = value.item()
+    return value
+
+
+def extract_expression_features(expr):
+    expr = str(expr or "")
+    operators = sorted(set(re.findall(r"\b[a-zA-Z_][a-zA-Z0-9_]*(?=\()", expr)))
+    fields = sorted(
+        set(
+            token
+            for token in re.findall(r"\b[a-zA-Z][a-zA-Z0-9_]{2,}\b", expr)
+            if token not in operators
+            and token
+            not in {
+                "market",
+                "sector",
+                "industry",
+                "subindustry",
+                "returns",
+                "volume",
+                "close",
+                "cap",
+                "assets",
+            }
+        )
+    )
+    return {"operators": operators, "fields": fields[:12]}
+
+
+def feedback_record_from_metrics(metrics, region=None, universe=None, neutralization=None, status=None):
+    record = result_row_from_metrics(metrics, region, universe, neutralization, status)
+    record.update(classify_alpha_feedback(metrics))
+    record.update(extract_expression_features(metrics.get("exp")))
+    return record
+
+
+def json_safe(value):
+    if isinstance(value, dict):
+        return {key: json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [json_safe(item) for item in value]
+    if pd.isna(value):
+        return None
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except ValueError:
+            return value
+    return value
+
+
+def append_jsonl(record, path):
+    if not path:
+        return
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(json_safe(record), ensure_ascii=False) + "\n")
+
+
+def append_simulation_feedback(metrics, jsonl_path=DEFAULT_FEEDBACK_JSONL, region=None, universe=None, neutralization=None, status=None):
+    append_jsonl(
+        feedback_record_from_metrics(metrics, region, universe, neutralization, status),
+        jsonl_path,
+    )
+
+
 def append_result_csv(metrics, csv_path=DEFAULT_RESULTS_CSV, region=None, universe=None, neutralization=None, status=None):
     if not csv_path:
         return
@@ -110,6 +230,8 @@ def append_result_csv(metrics, csv_path=DEFAULT_RESULTS_CSV, region=None, univer
         if not file_exists:
             writer.writeheader()
         writer.writerow(row)
+    feedback_path = csv_path.with_name("simulation_feedback.jsonl")
+    append_simulation_feedback(metrics, feedback_path, region, universe, neutralization, status)
 
 
 def load_logged_expressions(csv_path=DEFAULT_RESULTS_CSV):
@@ -215,6 +337,223 @@ def print_feedback_report(
             print(f"  expr: {row.get('expr', '')}")
 
     return candidates
+
+
+def parse_datetime(value):
+    if pd.isna(value):
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    for parser in (
+        lambda item: datetime.fromisoformat(item.replace("Z", "+00:00")),
+        lambda item: datetime.strptime(item[:19], "%Y-%m-%dT%H:%M:%S"),
+        lambda item: datetime.strptime(item[:19], "%Y-%m-%d %H:%M:%S"),
+    ):
+        try:
+            parsed = parser(text)
+            if parsed.tzinfo is not None:
+                parsed = parsed.replace(tzinfo=None)
+            return parsed
+        except ValueError:
+            continue
+    return None
+
+
+def format_when(value, now=None):
+    parsed = parse_datetime(value)
+    if parsed is None:
+        return ""
+
+    now = now or datetime.now()
+    seconds = max(0, int((now - parsed).total_seconds()))
+    if seconds < 60:
+        return f"{seconds}s ago"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}m ago"
+    hours = minutes // 60
+    if hours < 48:
+        return f"{hours}h ago"
+    days = hours // 24
+    if days < 30:
+        return f"{days}d ago"
+    return parsed.strftime("%m-%d")
+
+
+def shorten_expr(expr, width=96):
+    expr = str(expr or "").replace("\n", " ").strip()
+    if len(expr) <= width:
+        return expr
+    return expr[: width - 3] + "..."
+
+
+def format_alpha_table(df, expr_width=96):
+    headers = ["#", "Sharpe", "Fit", "When", "Alpha Expression"]
+    rows = []
+    now = datetime.now()
+    for idx, (_, row) in enumerate(df.iterrows(), start=1):
+        rows.append(
+            [
+                str(idx),
+                f"{row.get('sharpe', 0):.2f}",
+                f"{row.get('fitness', 0):.2f}",
+                format_when(row.get("logged_at") or row.get("dateCreated"), now),
+                shorten_expr(row.get("expr"), expr_width),
+            ]
+        )
+
+    widths = [len(header) for header in headers]
+    for row in rows:
+        widths = [max(width, len(cell)) for width, cell in zip(widths, row)]
+
+    def render_row(row):
+        return "| " + " | ".join(cell.ljust(width) for cell, width in zip(row, widths)) + " |"
+
+    divider = "+-" + "-+-".join("-" * width for width in widths) + "-+"
+    output = [divider, render_row(headers), divider]
+    output.extend(render_row(row) for row in rows)
+    output.append(divider)
+    return "\n".join(output)
+
+
+def select_high_quality_alphas(
+    csv_path=DEFAULT_RESULTS_CSV,
+    output_dir=None,
+    min_sharpe=1.6,
+    min_fitness=1.3,
+    top_n=None,
+    expr_width=96,
+):
+    df = load_results(csv_path)
+    if df.empty:
+        return pd.DataFrame()
+
+    required = {"sharpe", "fitness", "expr"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"Result log is missing required columns: {sorted(missing)}")
+
+    for col in ["sharpe", "fitness", "turnover", "margin", "decay"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    selected = df[
+        (df["fitness"] > min_fitness)
+        & (df["sharpe"] > min_sharpe)
+        & df["expr"].notna()
+    ].copy()
+    selected = selected.sort_values(["sharpe", "fitness"], ascending=False)
+    if top_n is not None:
+        selected = selected.head(int(top_n))
+
+    output_dir = Path(output_dir) if output_dir else Path(csv_path).parent
+    output_dir.mkdir(parents=True, exist_ok=True)
+    csv_out = output_dir / "high_quality_alphas.csv"
+    txt_out = output_dir / "high_quality_alphas.txt"
+
+    selected.to_csv(csv_out, index=False, encoding="utf-8-sig")
+
+    title = (
+        f"High Quality Alphas: fitness>{min_fitness}, sharpe>{min_sharpe} "
+        f"({len(selected)} rows)"
+    )
+    table = format_alpha_table(selected, expr_width=expr_width) if not selected.empty else "No matching alphas."
+    with open(txt_out, "w", encoding="utf-8") as f:
+        f.write(title + "\n")
+        f.write(table + "\n")
+
+    print("\n" + title)
+    print(table)
+    print(f"Wrote {csv_out}")
+    print(f"Wrote {txt_out}")
+    return selected
+
+
+def export_feedback_artifacts(
+    csv_path=DEFAULT_RESULTS_CSV,
+    output_dir=None,
+    min_sharpe=1.2,
+    min_fitness=1.0,
+    max_turnover=0.7,
+    top_n=50,
+):
+    df = load_results(csv_path)
+    if df.empty:
+        return {}
+
+    output_dir = Path(output_dir) if output_dir else Path(csv_path).parent
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    numeric_cols = ["sharpe", "fitness", "turnover", "margin", "decay"]
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    records = []
+    for _, row in df.iterrows():
+        metrics = {
+            "alpha_id": row.get("alpha_id"),
+            "exp": row.get("expr"),
+            "sharpe": row.get("sharpe"),
+            "fitness": row.get("fitness"),
+            "turnover": row.get("turnover"),
+            "margin": row.get("margin"),
+            "decay": row.get("decay"),
+            "dateCreated": row.get("dateCreated"),
+        }
+        record = feedback_record_from_metrics(
+            metrics,
+            row.get("region"),
+            row.get("universe"),
+            row.get("neutralization"),
+            row.get("status"),
+        )
+        records.append(record)
+
+    feedback_df = pd.DataFrame(records)
+    feedback_jsonl = output_dir / "feedback_for_ai.jsonl"
+    with open(feedback_jsonl, "w", encoding="utf-8") as f:
+        for record in records:
+            f.write(json.dumps(json_safe(record), ensure_ascii=False) + "\n")
+
+    candidates = feedback_df[
+        (feedback_df["sharpe"] >= min_sharpe)
+        & (feedback_df["fitness"] >= min_fitness)
+        & (feedback_df["turnover"] <= max_turnover)
+    ].copy()
+    candidates = candidates.sort_values(["sharpe", "fitness"], ascending=False)
+    candidates_csv = output_dir / "candidate_alphas.csv"
+    candidates.head(top_n).to_csv(candidates_csv, index=False, encoding="utf-8-sig")
+
+    summary = {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "source": str(csv_path),
+        "total_results": int(len(feedback_df)),
+        "candidate_results": int(len(candidates)),
+        "thresholds": {
+            "min_sharpe": min_sharpe,
+            "min_fitness": min_fitness,
+            "max_turnover": max_turnover,
+        },
+        "band_counts": feedback_df["band"].value_counts(dropna=False).to_dict(),
+        "issue_counts": feedback_df.explode("issues")["issues"].value_counts(dropna=True).head(20).to_dict(),
+        "top_operators": feedback_df.explode("operators")["operators"].value_counts(dropna=True).head(20).to_dict(),
+        "top_fields": feedback_df.explode("fields")["fields"].value_counts(dropna=True).head(30).to_dict(),
+        "top_candidates": candidates.head(min(top_n, 20)).to_dict(orient="records"),
+    }
+    summary_json = output_dir / "feedback_summary.json"
+    with open(summary_json, "w", encoding="utf-8") as f:
+        json.dump(json_safe(summary), f, ensure_ascii=False, indent=2)
+
+    print(f"Wrote {feedback_jsonl}")
+    print(f"Wrote {summary_json}")
+    print(f"Wrote {candidates_csv}")
+    return {
+        "feedback_jsonl": feedback_jsonl,
+        "summary_json": summary_json,
+        "candidates_csv": candidates_csv,
+    }
 
 
 def build_decay_retest_list(

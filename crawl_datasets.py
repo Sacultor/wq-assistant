@@ -7,12 +7,12 @@ import pandas as pd
 from machine_lib import get_datafields, get_datasets, login
 
 
-FIELD_COLUMNS = [
+DEFAULT_COLUMNS = [
     "dataset_id",
-    "field_id",
-    "field_type",
-    "field_name",
-    "field_description",
+    "id",
+    "type",
+    "name",
+    "description",
     "category",
     "subcategory",
     "region",
@@ -59,20 +59,6 @@ def flatten_list_values(df):
     return df
 
 
-def build_field_dictionary(fields_df):
-    df = fields_df.copy()
-    rename_map = {
-        "id": "field_id",
-        "type": "field_type",
-        "name": "field_name",
-        "description": "field_description",
-    }
-    df = df.rename(columns=rename_map)
-    df = ensure_columns(df, FIELD_COLUMNS)
-    ordered_cols = FIELD_COLUMNS + [col for col in df.columns if col not in FIELD_COLUMNS]
-    return df[ordered_cols]
-
-
 def fetch_dataset_fields(s, dataset_id, region, universe, delay, output_dir, resume=True):
     dataset_path = output_dir / "by_dataset" / f"{safe_filename(dataset_id)}.csv"
     if resume and dataset_path.exists():
@@ -101,17 +87,17 @@ def fetch_dataset_fields(s, dataset_id, region, universe, delay, output_dir, res
     return df
 
 
-def write_fields_by_dataset_txt(fields_df, datasets_df, path):
+def write_readable_txt(fields_df, datasets_df, path):
     path.parent.mkdir(parents=True, exist_ok=True)
-    fields_df = build_field_dictionary(fields_df)
+    fields_df = ensure_columns(fields_df.copy(), DEFAULT_COLUMNS)
 
     dataset_name_by_id = {}
     if not datasets_df.empty and {"id", "name"}.issubset(datasets_df.columns):
         dataset_name_by_id = dict(zip(datasets_df["id"], datasets_df["name"]))
 
     with open(path, "w", encoding="utf-8") as f:
-        f.write("WorldQuant Brain Data Fields By Dataset\n")
-        f.write("=" * 42 + "\n\n")
+        f.write("WorldQuant Brain Dataset Catalog\n")
+        f.write("=" * 36 + "\n\n")
         f.write(f"Total datasets: {fields_df['dataset_id'].nunique()}\n")
         f.write(f"Total fields: {len(fields_df)}\n\n")
 
@@ -124,11 +110,11 @@ def write_fields_by_dataset_txt(fields_df, datasets_df, path):
             f.write("-" * len(title) + "\n")
             f.write(f"Field count: {len(group)}\n\n")
 
-            for _, row in group.sort_values(["field_type", "field_id"]).iterrows():
-                field_id = row.get("field_id") or ""
-                field_type = row.get("field_type") or ""
-                name = row.get("field_name") or ""
-                description = row.get("field_description") or ""
+            for _, row in group.sort_values(["type", "id"]).iterrows():
+                field_id = row.get("id") or ""
+                field_type = row.get("type") or ""
+                name = row.get("name") or ""
+                description = row.get("description") or ""
                 category = row.get("category") or ""
                 subcategory = row.get("subcategory") or ""
 
@@ -183,16 +169,17 @@ def crawl(args):
 
     fields_all = pd.concat(all_fields, ignore_index=True)
     fields_all = flatten_list_values(fields_all)
-    save_csv(fields_all, output_dir / "datafields_raw_all.csv")
+    save_csv(fields_all, output_dir / "datafields_all.csv")
 
-    field_dictionary = build_field_dictionary(fields_all)
-    save_csv(field_dictionary, output_dir / "field_dictionary.csv")
-    write_fields_by_dataset_txt(fields_all, datasets_df, output_dir / "fields_by_dataset.txt")
+    readable_cols = [col for col in DEFAULT_COLUMNS if col in fields_all.columns]
+    extra_cols = [col for col in fields_all.columns if col not in readable_cols]
+    save_csv(fields_all[readable_cols + extra_cols], output_dir / "datafields_readable.csv")
+    write_readable_txt(fields_all, datasets_df, output_dir / "datafields_readable.txt")
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Crawl data fields inside WorldQuant Brain datasets into CSV and TXT files."
+        description="Crawl WorldQuant Brain datasets and data fields into CSV and TXT files."
     )
     parser.add_argument("--region", default="USA", help="Brain region, for example USA, EUR, CHN, JPN")
     parser.add_argument("--universe", default="TOP3000", help="Brain universe, for example TOP3000")

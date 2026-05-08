@@ -7,6 +7,7 @@ from machine_lib import (
     DEFAULT_RESULTS_CSV,
     build_decay_retest_list,
     check_submission,
+    export_feedback_artifacts,
     first_order_factory,
     get_alphas,
     get_datafields,
@@ -18,6 +19,7 @@ from machine_lib import (
     print_feedback_report,
     process_datafields,
     prune,
+    select_high_quality_alphas,
     trade_when_factory,
     ts_ops,
 )
@@ -56,6 +58,11 @@ DEFAULT_CONFIG = {
     "feedback_min_sharpe": 1.2,
     "feedback_min_fitness": 1.0,
     "feedback_max_turnover": 0.7,
+    "feedback_output_dir": "results",
+    "select_min_sharpe": 1.6,
+    "select_min_fitness": 1.3,
+    "select_top_n": 50,
+    "select_expr_width": 96,
 }
 
 
@@ -215,13 +222,31 @@ def run_report(config):
         min_fitness=config["feedback_min_fitness"],
         max_turnover=config["feedback_max_turnover"],
     )
+    export_feedback_artifacts(
+        config["results_csv"],
+        output_dir=config["feedback_output_dir"],
+        min_sharpe=config["feedback_min_sharpe"],
+        min_fitness=config["feedback_min_fitness"],
+        max_turnover=config["feedback_max_turnover"],
+    )
+
+
+def run_select(config):
+    select_high_quality_alphas(
+        config["results_csv"],
+        output_dir=config["feedback_output_dir"],
+        min_sharpe=config["select_min_sharpe"],
+        min_fitness=config["select_min_fitness"],
+        top_n=config["select_top_n"],
+        expr_width=config["select_expr_width"],
+    )
 
 
 def main():
     parser = argparse.ArgumentParser(description="Run the WorldQuant Brain alpha mining workflow")
     parser.add_argument(
         "action",
-        choices=["first", "second", "third", "retest-decay", "submit-check", "report", "all"],
+        choices=["first", "second", "third", "retest-decay", "submit-check", "report", "select", "all"],
         help="Workflow step to run",
     )
     parser.add_argument("--config", default="config.example.json", help="Path to JSON config file")
@@ -241,6 +266,8 @@ def main():
         run_submit_check(config)
     if args.action in {"report", "all"}:
         run_report(config)
+    if args.action in {"select", "all"}:
+        run_select(config)
 
 
 if __name__ == "__main__":

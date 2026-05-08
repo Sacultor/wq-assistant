@@ -32,5 +32,10 @@
   "submit_mark_tags": ["submittable", "wq-assistant"],
   "feedback_min_sharpe": 1.2,
   "feedback_min_fitness": 1.0,
-  "feedback_max_turnover": 0.7
+  "feedback_max_turnover": 0.7,
+  "feedback_output_dir": "results",
+  "select_min_sharpe": 1.6,
+  "select_min_fitness": 1.3,
+  "select_top_n": 50,
+  "select_expr_width": 96
 }
